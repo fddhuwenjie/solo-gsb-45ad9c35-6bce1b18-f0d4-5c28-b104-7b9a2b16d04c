@@ -6,20 +6,27 @@ let nextId = 1;
 const uid = () => 'id' + (nextId++);
 
 const state = {
+  mode: 'single',                 // 'single' | 'blend'
   room: { width: 6.5, depth: 8.0, height: 2.8, margin: 0.3 },
   screen: { width: 2.2, height: 1.24, bottom: 0.9, cx: 3.25 },
   schemes: [],
   obstacles: [],
   selectedSchemeId: null,
   selectedObstacleId: null,
-  point: { x: 3.25, y: 3.6 },     // 镜头安装点（顶视图坐标）
-  lensHeight: 1.55,               // 镜头高度
+  point: { x: 3.25, y: 3.6 },     // 单机：镜头安装点（顶视图坐标）
+  lensHeight: 1.55,               // 单机：镜头高度
   showAll: true,
   drawMode: false,
+  blendTemplate: null,            // 示例携带的拼接配置（切换到拼接模式时取用）
+  blend: {
+    segments: [],                 // [{id, scheme:{镜头参数}, u0,u1, min_overlap, clearance, point:{x,y}, lensZ}]
+    selectedIdx: 0,
+  },
 };
 
-let result = null;                // 最近一次服务器计算结果
+let result = null;                // 最近一次单机计算结果
 let resultById = {};
+let blendResult = null;           // 最近一次拼接联合计算结果
 let drag = null;                  // 当前拖拽会话
 let examples = [];
 
@@ -27,6 +34,7 @@ let examples = [];
 const SVGNS = 'http://www.w3.org/2000/svg';
 const topSvg = document.getElementById('topView');
 const sideSvg = document.getElementById('sideView');
+const stripSvg = document.getElementById('stripView');
 
 function el(name, attrs = {}, parent = null) {
   const e = document.createElementNS(SVGNS, name);
@@ -46,11 +54,29 @@ function colorOf(id) {
   const i = state.schemes.findIndex(s => s.id === id);
   return PALETTE[(i < 0 ? 0 : i) % PALETTE.length];
 }
+function devColor(k) { return PALETTE[k % PALETTE.length]; }
 function currentScheme() {
   return state.schemes.find(s => s.id === state.selectedSchemeId) || null;
 }
+function blendSegs() { return state.blend.segments; }
+function currentSeg() { return blendSegs()[state.blend.selectedIdx] || null; }
+function screenLeftX() { return state.screen.cx - state.screen.width / 2; }
+function uToX(u) { return screenLeftX() + u; }
+function xToU(x) { return x - screenLeftX(); }
+function segCenterX(seg) { return uToX((seg.u0 + seg.u1) / 2); }
 
 /* ================= 数据清洗 ================= */
+function sanitizeSingleParams(sch) {
+  sch.tr_min = clamp(sch.tr_min, 0.1, 10);
+  sch.tr_max = clamp(sch.tr_max, 0.1, 10);
+  if (sch.tr_min > sch.tr_max) [sch.tr_min, sch.tr_max] = [sch.tr_max, sch.tr_min];
+  sch.h_shift = clamp(sch.h_shift, 0, 1.5);
+  sch.v_shift = clamp(sch.v_shift, 0, 1.5);
+  sch.body_w = clamp(sch.body_w, 0.1, 2.5);
+  sch.body_d = clamp(sch.body_d, 0.1, 2.5);
+  sch.body_h = clamp(sch.body_h, 0.05, 1.5);
+}
+
 function sanitize() {
   const r = state.room, s = state.screen;
   r.width = clamp(r.width, 1, 30);
@@ -61,30 +87,47 @@ function sanitize() {
   s.height = clamp(s.height, 0.4, r.height);
   s.bottom = clamp(s.bottom, 0, r.height - s.height);
   s.cx = clamp(s.cx, s.width / 2, r.width - s.width / 2);
-  for (const sch of state.schemes) {
-    sch.tr_min = clamp(sch.tr_min, 0.1, 10);
-    sch.tr_max = clamp(sch.tr_max, 0.1, 10);
-    if (sch.tr_min > sch.tr_max) [sch.tr_min, sch.tr_max] = [sch.tr_max, sch.tr_min];
-    sch.h_shift = clamp(sch.h_shift, 0, 1.5);
-    sch.v_shift = clamp(sch.v_shift, 0, 1.5);
-    sch.body_w = clamp(sch.body_w, 0.1, 2);
-    sch.body_d = clamp(sch.body_d, 0.1, 2);
-    sch.body_h = clamp(sch.body_h, 0.05, 1.5);
-  }
+  for (const sch of state.schemes) sanitizeSingleParams(sch);
   for (const ob of state.obstacles) {
     ob.w = clamp(ob.w, 0.1, r.width);
     ob.h = clamp(ob.h, 0.1, r.depth);
     ob.x = clamp(ob.x, 0, r.width - ob.w);
     ob.y = clamp(ob.y, 0, r.depth - ob.h);
   }
-  state.point.x = clamp(state.point.x, 0, r.width);
-  state.point.y = clamp(state.point.y, 0, r.depth);
-  state.lensHeight = clamp(state.lensHeight, 0, r.height);
-  // 镜头高度夹取到当前方案可行范围（依据最近一次计算）
-  const sel = resultById[state.selectedSchemeId];
-  if (sel && sel.ranges.z) {
-    state.lensHeight = clamp(state.lensHeight, sel.ranges.z[0], sel.ranges.z[1]);
+  if (state.mode === 'single') {
+    state.point.x = clamp(state.point.x, 0, r.width);
+    state.point.y = clamp(state.point.y, 0, r.depth);
+    state.lensHeight = clamp(state.lensHeight, 0, r.height);
+    const sel = resultById[state.selectedSchemeId];
+    if (sel && sel.ranges.z) {
+      state.lensHeight = clamp(state.lensHeight, sel.ranges.z[0], sel.ranges.z[1]);
+    }
+  } else {
+    const sc = s.bottom + s.height / 2;
+    for (const seg of blendSegs()) {
+      sanitizeSingleParams(seg.scheme);
+      seg.u0 = clamp(seg.u0, -s.width * 0.5, s.width * 1.5);
+      seg.u1 = clamp(seg.u1, -s.width * 0.5, s.width * 1.5);
+      seg.min_overlap = clamp(seg.min_overlap, 0, s.width);
+      seg.clearance = clamp(seg.clearance, 0, 2);
+      seg.lensZ = clamp(seg.lensZ ?? sc, 0, r.height);
+      if (seg.point) {
+        seg.point.x = clamp(seg.point.x, 0, r.width);
+        seg.point.y = clamp(seg.point.y, 0, r.depth);
+      }
+      // 按该台垂直可行域夹取镜头高度（依据最近一次拼接结果）
+      const dv = blendDeviceResult(blendSegs().indexOf(seg));
+      if (dv && dv.ranges && dv.ranges.z) {
+        seg.lensZ = clamp(seg.lensZ, dv.ranges.z[0], dv.ranges.z[1]);
+      }
+    }
   }
+}
+
+function blendDeviceResult(k) {
+  if (!blendResult || blendResult.error || !blendResult.devices) return null;
+  if (k < 0 || k >= blendResult.count) return null;
+  return blendResult.devices[k];
 }
 
 /* ================= 服务器计算 ================= */
@@ -93,27 +136,176 @@ function scheduleCompute() {
   clearTimeout(computeTimer);
   computeTimer = setTimeout(doCompute, 40);
 }
+
+function blendPayload() {
+  const segments = blendSegs().map(seg => ({
+    scheme: { ...seg.scheme, u0: seg.u0, u1: seg.u1 },
+    min_overlap: seg.min_overlap,
+    clearance: seg.clearance,
+  }));
+  return {
+    room: state.room, screen: state.screen, obstacles: state.obstacles,
+    segments,
+    points: blendSegs().map(seg => seg.point ? { ...seg.point } : null),
+    lens_heights: blendSegs().map(seg => seg.lensZ),
+  };
+}
+
 async function doCompute() {
   const seq = ++computeSeq;
-  const payload = {
-    room: state.room, screen: state.screen, schemes: state.schemes,
-    obstacles: state.obstacles, point: state.point, lens_height: state.lensHeight,
-  };
   try {
-    const res = await fetch('/api/compute', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok || seq !== computeSeq) return;
-    result = await res.json();
-    resultById = {};
-    for (const s of result.schemes) resultById[s.id] = s;
+    if (state.mode === 'single') {
+      const payload = {
+        room: state.room, screen: state.screen, schemes: state.schemes,
+        obstacles: state.obstacles, point: state.point, lens_height: state.lensHeight,
+      };
+      const res = await fetch('/api/compute', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok || seq !== computeSeq) return;
+      result = await res.json();
+      resultById = {};
+      for (const s of result.schemes) resultById[s.id] = s;
+    } else {
+      const res = await fetch('/api/blend', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(blendPayload()),
+      });
+      if (!res.ok || seq !== computeSeq) {
+        if (res.status === 400) blendResult = await res.json().catch(() => null);
+        render();
+        return;
+      }
+      blendResult = await res.json();
+      // 初次求解（存在设备尚无安装点）时自动采纳服务器建议点，保持整体状态一致；
+      // 用户拖动导致的 joint_conflict 保留用户当前点，由其点击「采纳建议点」
+      // 或点击顶视图 × 标记，避免拖动松手后点位跳动。
+      const needInit = blendSegs().some(seg => !seg.point) &&
+                       blendResult.suggested_points &&
+                       ['ok', 'joint_conflict'].includes(blendResult.status);
+      if (needInit) {
+        adoptSuggested(false);
+      }
+    }
     render();
   } catch (err) { /* 网络异常时保留旧结果 */ }
 }
+
+function adoptSuggested(recompute = true) {
+  if (!blendResult || !blendResult.suggested_points) return;
+  blendResult.suggested_points.forEach((p, k) => {
+    if (blendSegs()[k]) blendSegs()[k].point = { ...p };
+  });
+  if (recompute) onStateChange();
+  else render();
+}
+
 function onStateChange() {
   render();
   scheduleCompute();
+}
+
+/* ================= 模式切换 / 区间初始化 ================= */
+function makeBlendSegment(template, idx, fallbackScheme) {
+  const sc = state.screen.bottom + state.screen.height / 2;
+  if (template) {
+    const src = state.schemes[template.scheme_idx] || fallbackScheme;
+    return {
+      id: uid(),
+      scheme: { name: `${idx + 1}号机 · ${src.name}`, ...sanitizeClone(src) },
+      u0: template.u0, u1: template.u1,
+      min_overlap: template.min_overlap ?? 0.2,
+      clearance: template.clearance ?? 0.3,
+      point: null, lensZ: sc,
+    };
+  }
+  return {
+    id: uid(),
+    scheme: { name: `${idx + 1}号机`, ...sanitizeClone(fallbackScheme) },
+    u0: 0, u1: 0, min_overlap: 0.2, clearance: 0.3,
+    point: null, lensZ: sc,
+  };
+}
+
+function sanitizeClone(src) {
+  const c = { ...src };
+  delete c.id;
+  return c;
+}
+
+function splitSegmentsEven(n) {
+  /* 均分：n 台连续覆盖整幅幕，相邻重叠 ov，两端各越界 ext；
+     令 u0_0=-ext、u1_{n-1}=Sw+ext，相邻 u0_{k+1}=u1_k-ov。 */
+  const Sw = state.screen.width;
+  const ov = Math.min(0.2, Sw / 6), ext = 0.1;
+  const w = (Sw + 2 * ext + (n - 1) * ov) / n;
+  const template = state.blendTemplate;
+  const old = blendSegs();
+  const segs = [];
+  for (let k = 0; k < n; k++) {
+    const u0 = -ext + k * (w - ov);
+    const u1 = u0 + w;
+    let seg;
+    if (old[k]) {
+      seg = old[k];
+    } else {
+      const t = template && template.segments[k];
+      const fb = state.schemes[0] || {
+        name: '镜头 1.3–2.1', tr_min: 1.3, tr_max: 2.1, h_shift: 0.4, v_shift: 0.5,
+        body_w: 0.42, body_d: 0.35, body_h: 0.16,
+      };
+      seg = makeBlendSegment(t, k, fb);
+    }
+    seg.u0 = u0; seg.u1 = u1;
+    seg.point = null;                 // 重分区间后由服务器重新给出建议点
+    segs.push(seg);
+  }
+  state.blend.segments = segs;
+  state.blend.selectedIdx = clamp(state.blend.selectedIdx, 0, n - 1);
+}
+
+function enterBlendMode() {
+  state.mode = 'blend';
+  if (state.blendTemplate) {
+    // 示例携带拼接配置：按模板重建区间
+    const segs = [];
+    state.blendTemplate.segments.forEach((t, k) => {
+      const fb = state.schemes[t.scheme_idx] || state.schemes[0] || {
+        name: '镜头 1.3–2.1', tr_min: 1.3, tr_max: 2.1, h_shift: 0.4, v_shift: 0.5,
+        body_w: 0.42, body_d: 0.35, body_h: 0.16,
+      };
+      segs.push(makeBlendSegment(t, k, fb));
+    });
+    state.blend.segments = segs;
+    state.blend.selectedIdx = 0;
+  } else if (!state.blend.segments.length) {
+    splitSegmentsEven(2);
+  }
+  document.getElementById('blendCount').value = String(blendSegs().length);
+  applyModeChrome();
+  onStateChange();
+}
+
+function enterSingleMode() {
+  state.mode = 'single';
+  applyModeChrome();
+  onStateChange();
+}
+
+function applyModeChrome() {
+  const blend = state.mode === 'blend';
+  document.getElementById('modeSingle').classList.toggle('active', !blend);
+  document.getElementById('modeBlend').classList.toggle('active', blend);
+  document.querySelectorAll('.mode-single').forEach(n => { n.hidden = blend; });
+  document.querySelectorAll('.mode-blend').forEach(n => { n.hidden = !blend; });
+  document.getElementById('showAllWrap').style.display = blend ? 'none' : '';
+  document.getElementById('topTitle').textContent = blend
+    ? '顶视图（多机拼接 · 虚线框=检修包络 · ○=当前安装点 · ×=服务器建议点 · 拖动任一点即时重算）'
+    : '顶视图（单击/拖动设置安装点 · 拖动幕布与禁装区即时重算）';
+  document.getElementById('sideTitle').textContent = blend
+    ? '侧视图（多机拼接 · 各机镜头高度独立 · 拖动机身即时重算）'
+    : '侧视图（沿幕布墙剖面 · 拖动投影机调整镜头高度与距离）';
 }
 
 /* ================= SVG 公共件 ================= */
@@ -131,6 +323,13 @@ function addDefs(svg, suffix) {
   }, defs);
   el('rect', { width: 0.14, height: 0.14, fill: 'rgba(224,49,49,0.10)' }, pat);
   el('line', { x1: 0, y1: 0, x2: 0, y2: 0.14, stroke: 'rgba(224,49,49,0.55)', 'stroke-width': 0.035 }, pat);
+  // 重叠区斜纹（绿色）
+  const ovPat = el('pattern', {
+    id: 'ovhatch' + suffix, width: 0.12, height: 0.12,
+    patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(-45)',
+  }, defs);
+  el('rect', { width: 0.12, height: 0.12, fill: 'rgba(47,158,68,0.10)' }, ovPat);
+  el('line', { x1: 0, y1: 0, x2: 0, y2: 0.12, stroke: 'rgba(47,158,68,0.6)', 'stroke-width': 0.03 }, ovPat);
 }
 
 function textAt(svg, x, y, str, size = 0.13, fill = '#495057', anchor = 'middle') {
@@ -142,7 +341,7 @@ function textAt(svg, x, y, str, size = 0.13, fill = '#495057', anchor = 'middle'
   return t;
 }
 
-/* 线性尺寸标注：测量 (x1,y1)-(x2,y2)，沿法向偏移 off 绘制 */
+/* 线性尺寸标注 */
 function drawDim(svg, x1, y1, x2, y2, off, label, suffix) {
   const dx = x2 - x1, dy = y2 - y1;
   const len = Math.hypot(dx, dy);
@@ -161,22 +360,10 @@ function drawDim(svg, x1, y1, x2, y2, off, label, suffix) {
   textAt(g, (ax + bx) / 2, (ay + by) / 2 - 0.02, label, 0.13, '#495057');
 }
 
-/* ================= 顶视图 ================= */
-const TOP_PAD = { l: 1.15, t: 0.85, r: 1.05, b: 0.95 };
-
-function renderTop() {
-  const svg = topSvg;
-  svg.innerHTML = '';
-  const { width: W, depth: D, margin: m } = state.room;
-  const s = state.screen;
-  svg.setAttribute('viewBox', `${-TOP_PAD.l} ${-TOP_PAD.t} ${W + TOP_PAD.l + TOP_PAD.r} ${D + TOP_PAD.t + TOP_PAD.b}`);
-  addDefs(svg, 'T');
-
-  // 房间与 1m 网格
+function drawRoom(svg, W, D, m) {
   el('rect', { x: 0, y: 0, width: W, height: D, fill: '#fbfcfd', stroke: '#343a40', 'stroke-width': 0.03 }, svg);
   for (let gx = 1; gx < W; gx++) el('line', { x1: gx, y1: 0, x2: gx, y2: D, stroke: '#eef1f3', 'stroke-width': 0.01 }, svg);
   for (let gy = 1; gy < D; gy++) el('line', { x1: 0, y1: gy, x2: W, y2: gy, stroke: '#eef1f3', 'stroke-width': 0.01 }, svg);
-  // 墙面余量
   if (m > 0.001) {
     el('rect', {
       x: m, y: m, width: W - 2 * m, height: D - 2 * m, fill: 'none',
@@ -184,10 +371,69 @@ function renderTop() {
     }, svg);
     textAt(svg, W - m - 0.06, m + 0.12, `墙面余量 ${fmt(m)}m`, 0.11, '#868e96', 'end');
   }
-  // 幕布中心线
+}
+
+function drawObstacles(svg) {
+  for (const ob of state.obstacles) {
+    const isSel = ob.id === state.selectedObstacleId;
+    const g = el('g', {}, svg);
+    el('rect', {
+      x: ob.x, y: ob.y, width: ob.w, height: ob.h,
+      fill: 'url(#hatchT)', stroke: '#e03131',
+      'stroke-width': isSel ? 0.03 : 0.018, class: 'ob-rect',
+    }, g).addEventListener('pointerdown', e => {
+      state.selectedObstacleId = ob.id;
+      const w = svgWorld(svg, e);
+      startDrag(e, { type: 'ob', id: ob.id, dx: w.x - ob.x, dy: w.y - ob.y });
+      onStateChange();
+    });
+    textAt(g, ob.x + ob.w / 2, ob.y + ob.h / 2 - 0.08, ob.name, 0.12, '#c92a2a');
+    textAt(g, ob.x + ob.w / 2, ob.y + ob.h / 2 + 0.08, `${fmt(ob.w)}×${fmt(ob.h)}m`, 0.1, '#c92a2a');
+    if (isSel) {
+      el('circle', { cx: ob.x + ob.w, cy: ob.y + ob.h, r: 0.08, class: 'resize-handle' }, g)
+        .addEventListener('pointerdown', e => startDrag(e, { type: 'obresize', id: ob.id }));
+    }
+  }
+  if (drag && drag.type === 'draw') {
+    const x = Math.min(drag.x0, drag.x1), y = Math.min(drag.y0, drag.y1);
+    const w = Math.abs(drag.x1 - drag.x0), h = Math.abs(drag.y1 - drag.y0);
+    el('rect', {
+      x, y, width: w, height: h, fill: 'rgba(224,49,49,0.15)',
+      stroke: '#e03131', 'stroke-width': 0.02, 'stroke-dasharray': '0.08 0.05',
+    }, svg);
+    textAt(svg, x + w / 2, y + h / 2, `${fmt(w)}×${fmt(h)}m`, 0.12, '#c92a2a');
+  }
+}
+
+function drawScreenCore(svg, s) {
+  el('rect', { x: s.cx - s.width / 2, y: -0.07, width: s.width, height: 0.07, fill: '#1864ab' }, svg)
+    .addEventListener('pointerdown', e => {
+      const w = svgWorld(svg, e);
+      startDrag(e, { type: 'screen', dx: w.x - s.cx });
+    });
+  el('rect', {
+    x: s.cx - s.width / 2, y: -0.14, width: s.width, height: 0.2,
+    fill: '#1864ab', 'fill-opacity': 0.12, class: 'screen-hit',
+  }, svg).addEventListener('pointerdown', e => {
+    const w = svgWorld(svg, e);
+    startDrag(e, { type: 'screen', dx: w.x - s.cx });
+  });
+  textAt(svg, s.cx, -0.28, '幕布', 0.12, '#1864ab');
+}
+
+/* ================= 顶视图（单机） ================= */
+const TOP_PAD = { l: 1.15, t: 0.85, r: 1.05, b: 0.95 };
+
+function renderTopSingle() {
+  const svg = topSvg;
+  const { width: W, depth: D, margin: m } = state.room;
+  const s = state.screen;
+  svg.setAttribute('viewBox', `${-TOP_PAD.l} ${-TOP_PAD.t} ${W + TOP_PAD.l + TOP_PAD.r} ${D + TOP_PAD.t + TOP_PAD.b}`);
+  addDefs(svg, 'T');
+
+  drawRoom(svg, W, D, m);
   el('line', { x1: s.cx, y1: 0, x2: s.cx, y2: D, stroke: '#e9ecef', 'stroke-width': 0.012, 'stroke-dasharray': '0.1 0.06' }, svg);
 
-  // 各方案可安装区域
   if (result) {
     const ordered = [...result.schemes].sort((a, b) => (a.id === state.selectedSchemeId ? 1 : 0) - (b.id === state.selectedSchemeId ? 1 : 0));
     for (const sr of ordered) {
@@ -196,32 +442,25 @@ function renderTop() {
       const color = colorOf(sr.id);
       for (const r of sr.region) {
         if (r[2] - r[0] <= 1e-6 && r[3] - r[1] > 1e-6) {
-          // 退化可行域：固定 x 的安装线段，画成粗线段
           el('line', {
             x1: r[0], y1: r[1], x2: r[2], y2: r[3],
             stroke: color, 'stroke-width': isSel ? 0.07 : 0.05,
-            'stroke-linecap': 'round',
-            'stroke-opacity': isSel ? 0.95 : 0.55,
+            'stroke-linecap': 'round', 'stroke-opacity': isSel ? 0.95 : 0.55,
           }, svg);
           if (isSel) {
             for (const yy of [r[1], r[3]]) {
-              el('line', {
-                x1: r[0] - 0.1, y1: yy, x2: r[0] + 0.1, y2: yy,
-                stroke: color, 'stroke-width': 0.02, 'stroke-opacity': 0.9,
-              }, svg);
+              el('line', { x1: r[0] - 0.1, y1: yy, x2: r[0] + 0.1, y2: yy, stroke: color, 'stroke-width': 0.02, 'stroke-opacity': 0.9 }, svg);
             }
           }
         } else {
           el('rect', {
             x: r[0], y: r[1], width: Math.max(0, r[2] - r[0]), height: Math.max(0, r[3] - r[1]),
             fill: color, 'fill-opacity': isSel ? 0.30 : 0.10,
-            stroke: color, 'stroke-width': isSel ? 0.02 : 0.01,
-            'stroke-opacity': isSel ? 0.95 : 0.45,
+            stroke: color, 'stroke-width': isSel ? 0.02 : 0.01, 'stroke-opacity': isSel ? 0.95 : 0.45,
           }, svg);
         }
       }
     }
-    // 选中方案：基础交集矩形 + 投射距离边界线
     const sel = resultById[state.selectedSchemeId];
     if (sel) {
       const color = colorOf(sel.id);
@@ -239,7 +478,6 @@ function renderTop() {
           textAt(svg, 0.06, yy - 0.1, lbl, 0.11, color, 'start');
         }
       }
-      // 安装线方案：标注扣除障碍后的可行总长度
       if (sel.domain === 'line' && sel.line_length > 0 && sel.region.length) {
         const f = sel.region[0];
         textAt(svg, f[0] + 0.14, (f[1] + f[3]) / 2,
@@ -248,7 +486,6 @@ function renderTop() {
     }
   }
 
-  // 投射包络（选中方案 + 当前选点）
   const sch = currentScheme();
   const sel = resultById[state.selectedSchemeId];
   const p = state.point;
@@ -260,57 +497,9 @@ function renderTop() {
     }, svg);
   }
 
-  // 禁装区
-  for (const ob of state.obstacles) {
-    const isSel = ob.id === state.selectedObstacleId;
-    const g = el('g', {}, svg);
-    const rect = el('rect', {
-      x: ob.x, y: ob.y, width: ob.w, height: ob.h,
-      fill: 'url(#hatchT)', stroke: '#e03131',
-      'stroke-width': isSel ? 0.03 : 0.018, class: 'ob-rect',
-    }, g);
-    rect.addEventListener('pointerdown', e => {
-      state.selectedObstacleId = ob.id;
-      const w = svgWorld(svg, e);
-      startDrag(e, { type: 'ob', id: ob.id, dx: w.x - ob.x, dy: w.y - ob.y });
-      onStateChange();
-    });
-    textAt(g, ob.x + ob.w / 2, ob.y + ob.h / 2 - 0.08, ob.name, 0.12, '#c92a2a');
-    textAt(g, ob.x + ob.w / 2, ob.y + ob.h / 2 + 0.08, `${fmt(ob.w)}×${fmt(ob.h)}m`, 0.1, '#c92a2a');
-    if (isSel) {
-      const h = el('circle', { cx: ob.x + ob.w, cy: ob.y + ob.h, r: 0.08, class: 'resize-handle' }, g);
-      h.addEventListener('pointerdown', e => startDrag(e, { type: 'obresize', id: ob.id }));
-    }
-  }
+  drawObstacles(svg);
+  drawScreenCore(svg, s);
 
-  // 绘制中的禁装区预览
-  if (drag && drag.type === 'draw') {
-    const x = Math.min(drag.x0, drag.x1), y = Math.min(drag.y0, drag.y1);
-    const w = Math.abs(drag.x1 - drag.x0), h = Math.abs(drag.y1 - drag.y0);
-    el('rect', {
-      x, y, width: w, height: h, fill: 'rgba(224,49,49,0.15)',
-      stroke: '#e03131', 'stroke-width': 0.02, 'stroke-dasharray': '0.08 0.05',
-    }, svg);
-    textAt(svg, x + w / 2, y + h / 2, `${fmt(w)}×${fmt(h)}m`, 0.12, '#c92a2a');
-  }
-
-  // 幕布（可拖动）
-  const scrHit = el('rect', {
-    x: s.cx - s.width / 2, y: -0.14, width: s.width, height: 0.2,
-    fill: '#1864ab', 'fill-opacity': 0.18, class: 'screen-hit',
-  }, svg);
-  scrHit.addEventListener('pointerdown', e => {
-    const w = svgWorld(svg, e);
-    startDrag(e, { type: 'screen', dx: w.x - s.cx });
-  });
-  el('rect', { x: s.cx - s.width / 2, y: -0.07, width: s.width, height: 0.07, fill: '#1864ab', class: 'screen-core' }, svg)
-    .addEventListener('pointerdown', e => {
-      const w = svgWorld(svg, e);
-      startDrag(e, { type: 'screen', dx: w.x - s.cx });
-    });
-  textAt(svg, s.cx, -0.28, '幕布', 0.12, '#1864ab');
-
-  // 机身 + 镜头选点
   if (sch && sel) {
     const ok = sel.point && sel.point.ok;
     el('rect', {
@@ -323,21 +512,184 @@ function renderTop() {
     el('circle', { cx: p.x, cy: p.y, r: 0.05, fill: '#fff', stroke: '#1971c2', 'stroke-width': 0.025 }, g);
     g.addEventListener('pointerdown', e => startDrag(e, { type: 'point' }));
     textAt(svg, p.x + 0.14, p.y - 0.12, '镜头', 0.11, '#1971c2', 'start');
-    // 选点边界尺寸
     drawDim(svg, 0, p.y, p.x, p.y, -0.26, `x=${fmt(p.x)}m`, 'T');
     drawDim(svg, p.x, 0, p.x, p.y, 0.26, `L=${fmt(p.y)}m`, 'T');
   }
 
-  // 房间与幕布尺寸
   drawDim(svg, 0, D, W, D, 0.42, `房间宽 ${fmt(W)} m`, 'T');
   drawDim(svg, W, 0, W, D, -0.42, `进深 ${fmt(D)} m`, 'T');
   drawDim(svg, s.cx - s.width / 2, 0, s.cx + s.width / 2, 0, -0.5, `幕宽 ${fmt(s.width)} m`, 'T');
 }
 
-/* ================= 侧视图 ================= */
+/* ================= 顶视图（拼接） ================= */
+function renderTopBlend() {
+  const svg = topSvg;
+  const { width: W, depth: D, margin: m } = state.room;
+  const s = state.screen;
+  const segs = blendSegs();
+  const n = segs.length;
+  // 区间可能越界，扩展标注范围
+  const minU = Math.min(0, ...segs.map(g => g.u0));
+  const maxU = Math.max(s.width, ...segs.map(g => g.u1));
+  const xLo = Math.min(0, uToX(minU));
+  const xHi = Math.max(W, uToX(maxU));
+  svg.setAttribute('viewBox', `${xLo - TOP_PAD.l} ${-TOP_PAD.t} ${xHi - xLo + TOP_PAD.l + TOP_PAD.r} ${D + TOP_PAD.t + TOP_PAD.b}`);
+  addDefs(svg, 'T');
+
+  drawRoom(svg, W, D, m);
+
+  if (blendResult && !blendResult.error) {
+    // 非选中设备先画，选中设备最后画
+    const order = [...segs.map((_, k) => k)]
+      .sort((a, b) => (a === state.blend.selectedIdx ? 1 : 0) - (b === state.blend.selectedIdx ? 1 : 0));
+    for (const k of order) {
+      const dv = blendResult.devices[k];
+      const seg = segs[k];
+      const isSel = k === state.blend.selectedIdx;
+      const color = devColor(k);
+      if (!dv) continue;
+      for (const r of dv.region) {
+        if (r[2] - r[0] <= 1e-6 && r[3] - r[1] > 1e-6) {
+          el('line', {
+            x1: r[0], y1: r[1], x2: r[2], y2: r[3],
+            stroke: color, 'stroke-width': isSel ? 0.07 : 0.05,
+            'stroke-linecap': 'round', 'stroke-opacity': isSel ? 0.95 : 0.5,
+          }, svg);
+        } else {
+          el('rect', {
+            x: r[0], y: r[1], width: Math.max(0, r[2] - r[0]), height: Math.max(0, r[3] - r[1]),
+            fill: color, 'fill-opacity': isSel ? 0.26 : 0.09,
+            stroke: color, 'stroke-width': isSel ? 0.02 : 0.01, 'stroke-opacity': isSel ? 0.9 : 0.4,
+          }, svg);
+        }
+      }
+      if (isSel && dv.base_rect) {
+        const b = dv.base_rect;
+        el('rect', {
+          x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1], fill: 'none',
+          stroke: color, 'stroke-width': 0.016, 'stroke-dasharray': '0.1 0.05', 'stroke-opacity': 0.8,
+        }, svg);
+      }
+      // 区间覆盖光锥
+      const p = seg.point;
+      if (p) {
+        const cxk = segCenterX(seg), hwk = (seg.u1 - seg.u0) / 2;
+        el('polygon', {
+          points: `${p.x},${p.y} ${cxk - hwk},0 ${cxk + hwk},0`,
+          fill: color, 'fill-opacity': 0.07, stroke: color,
+          'stroke-width': 0.012, 'stroke-dasharray': '0.07 0.05', 'stroke-opacity': 0.7,
+        }, svg);
+      }
+    }
+  }
+
+  drawObstacles(svg);
+
+  // 幕布条 + 邻接重叠带（贴在前墙上）
+  const xL = screenLeftX(), xR = xL + s.width;
+  el('rect', { x: xL, y: -0.09, width: s.width, height: 0.09, fill: '#1864ab' }, svg);
+  if (blendResult && !blendResult.error) {
+    for (const ov of blendResult.overlaps) {
+      if (ov.value <= 0) continue;
+      const k = ov.between[0];
+      const a = uToX(segs[k + 1].u0), b = uToX(segs[k].u1);
+      if (b - a > 0.001) {
+        el('rect', {
+          x: a, y: -0.09, width: b - a, height: 0.09,
+          fill: ov.ok ? 'url(#ovhatchT)' : '#e03131', 'fill-opacity': ov.ok ? 1 : 0.55,
+        }, svg);
+      }
+    }
+  }
+  drawScreenCore(svg, s);
+
+  // 覆盖未到/超出的幕布端提示（区间未覆盖整幅幕）
+  if (blendResult && !blendResult.error) {
+    const u0 = segs[0].u0, u1 = segs[n - 1].u1;
+    if (u0 > 1e-6) el('rect', { x: xL, y: -0.16, width: uToX(u0) - xL, height: 0.05, fill: '#e03131' }, svg);
+    if (u1 < s.width - 1e-6) el('rect', { x: uToX(u1), y: -0.16, width: xR - uToX(u1), height: 0.05, fill: '#e03131' }, svg);
+  }
+
+  // 检修包络 / 机身 / 安装点
+  const pairSet = new Set();
+  const conflictEnvs = [];
+  if (blendResult && blendResult.point_conflicts) {
+    for (const c of blendResult.point_conflicts) {
+      if (c.type === 'pair') {
+        pairSet.add(c.devices.join(','));
+        conflictEnvs.push(...c.envelopes);
+      }
+    }
+  }
+  if (blendResult && !blendResult.error) {
+    for (let k = 0; k < n; k++) {
+      const seg = segs[k], dv = blendResult.devices[k];
+      const color = devColor(k);
+      const p = seg.point;
+      if (!p) continue;
+      const { body_w: bw, body_d: bd } = seg.scheme;
+      const cl = seg.clearance;
+      // 检修包络
+      const env = [p.x - bw / 2 - cl, p.y - cl, p.x + bw / 2 + cl, p.y + bd + cl];
+      const inPair = [...pairSet].some(t => t.split(',').includes(String(k)));
+      const selfBad = dv && dv.point && !dv.point.ok;
+      el('rect', {
+        x: env[0], y: env[1], width: env[2] - env[0], height: env[3] - env[1],
+        fill: color, 'fill-opacity': 0.07,
+        stroke: inPair ? '#e03131' : color, 'stroke-width': inPair ? 0.03 : 0.016,
+        'stroke-dasharray': '0.09 0.05', 'stroke-opacity': inPair ? 0.95 : 0.8,
+      }, svg);
+      // 机身
+      const ok = dv && dv.point && dv.point.ok && !inPair && !selfBad;
+      el('rect', {
+        x: p.x - bw / 2, y: p.y, width: bw, height: bd,
+        fill: ok ? color : '#e03131', 'fill-opacity': ok ? 0.4 : 0.4,
+        stroke: ok ? color : '#c92a2a', 'stroke-width': 0.02,
+      }, svg);
+      // 安装点手柄
+      const g = el('g', { class: 'point-handle' }, svg);
+      el('circle', { cx: p.x, cy: p.y, r: 0.1, fill: ok ? color : '#e03131', 'fill-opacity': 0.25 }, g);
+      el('circle', { cx: p.x, cy: p.y, r: 0.055, fill: '#fff', stroke: ok ? color : '#e03131', 'stroke-width': 0.025 }, g);
+      g.addEventListener('pointerdown', e => {
+        state.blend.selectedIdx = k;
+        startDrag(e, { type: 'bpoint', idx: k });
+        render();
+      });
+      textAt(svg, p.x, p.y - 0.16, `${k + 1}号机`, 0.12, color);
+    }
+    // 建议点标记（与当前点不同处画 ×）
+    if (blendResult.suggested_points) {
+      blendResult.suggested_points.forEach((sp, k) => {
+        const cp = segs[k].point;
+        if (cp && Math.hypot(cp.x - sp.x, cp.y - sp.y) < 0.03) return;
+        const c = devColor(k);
+        const g = el('g', { class: 'sugg-handle' }, svg);
+        el('line', { x1: sp.x - 0.07, y1: sp.y - 0.07, x2: sp.x + 0.07, y2: sp.y + 0.07, stroke: '#2b8a3e', 'stroke-width': 0.025 }, g);
+        el('line', { x1: sp.x - 0.07, y1: sp.y + 0.07, x2: sp.x + 0.07, y2: sp.y - 0.07, stroke: '#2b8a3e', 'stroke-width': 0.025 }, g);
+        g.addEventListener('pointerdown', e => {
+          state.blend.selectedIdx = k;
+          startDrag(e, { type: 'bpoint', idx: k });
+          segs[k].point = { ...sp };
+          render();
+        });
+      });
+    }
+  }
+
+  drawDim(svg, 0, D, W, D, 0.42, `房间宽 ${fmt(W)} m`, 'T');
+  drawDim(svg, W, 0, W, D, -0.42, `进深 ${fmt(D)} m`, 'T');
+}
+
+function renderTop() {
+  topSvg.innerHTML = '';
+  if (state.mode === 'single') renderTopSingle();
+  else renderTopBlend();
+}
+
+/* ================= 侧视图（单机） ================= */
 const SIDE_PAD = { l: 1.15, t: 0.55, r: 1.05, b: 1.15 };
 
-function renderSide() {
+function renderSideSingle() {
   const svg = sideSvg;
   svg.innerHTML = '';
   const { depth: D, height: H } = state.room;
@@ -352,7 +704,6 @@ function renderSide() {
   textAt(svg, D - 0.06, -0.16, '后墙', 0.12, '#868e96', 'end');
   textAt(svg, D - 0.06, H - 0.12, '地面', 0.11, '#868e96', 'end');
 
-  // 禁装区（全高障碍带）
   for (const ob of state.obstacles) {
     el('rect', {
       x: ob.y, y: 0, width: ob.h, height: H,
@@ -361,7 +712,6 @@ function renderSide() {
     textAt(svg, ob.y + ob.h / 2, 0.14, ob.name, 0.1, '#c92a2a');
   }
 
-  // 各方案侧视可行域（投射距离 × 镜头高度）
   if (result) {
     const ordered = [...result.schemes].sort((a, b) => (a.id === state.selectedSchemeId ? 1 : 0) - (b.id === state.selectedSchemeId ? 1 : 0));
     for (const sr of ordered) {
@@ -379,22 +729,18 @@ function renderSide() {
     }
   }
 
-  // 幕布
   el('rect', { x: -0.06, y: Z(s.bottom + s.height), width: 0.06, height: s.height, fill: '#1864ab' }, svg);
   drawDim(svg, 0, Z(0), 0, Z(s.bottom), -0.3, `下沿 ${fmt(s.bottom)}m`, 'S');
   drawDim(svg, 0, Z(s.bottom), 0, Z(s.bottom + s.height), -0.3, `幕高 ${fmt(s.height)}m`, 'S');
 
-  // 投影机（镜头 + 机身，可拖动）
   const sch = currentScheme();
   const sel = resultById[state.selectedSchemeId];
   const p = state.point;
   const hz = state.lensHeight;
   if (sch && sel) {
     const ok = sel.point && sel.point.ok;
-    // 投射包络
     el('line', { x1: p.y, y1: Z(hz), x2: 0, y2: Z(s.bottom + s.height), stroke: '#1971c2', 'stroke-width': 0.014, 'stroke-dasharray': '0.07 0.05' }, svg);
     el('line', { x1: p.y, y1: Z(hz), x2: 0, y2: Z(s.bottom), stroke: '#1971c2', 'stroke-width': 0.014, 'stroke-dasharray': '0.07 0.05' }, svg);
-    // 机身（镜头在前表面，机身向后延伸）
     const body = el('rect', {
       x: p.y, y: Z(hz + sch.body_h / 2), width: sch.body_d, height: sch.body_h,
       fill: ok ? 'rgba(47,158,68,0.45)' : 'rgba(224,49,49,0.45)',
@@ -406,22 +752,213 @@ function renderSide() {
     el('circle', { cx: p.y, cy: Z(hz), r: 0.045, fill: '#fff', stroke: '#1971c2', 'stroke-width': 0.022 }, lens);
     lens.addEventListener('pointerdown', e => startDrag(e, { type: 'sidepoint' }));
     textAt(svg, p.y + 0.12, Z(hz) - 0.14, '镜头', 0.11, '#1971c2', 'start');
-    // 选点边界尺寸
     drawDim(svg, p.y, Z(0), p.y, Z(hz), 0.3, `h=${fmt(hz)}m`, 'S');
     drawDim(svg, 0, H, p.y, H, 0.38, `L=${fmt(p.y)}m`, 'S');
   }
 
-  // 房间尺寸
   drawDim(svg, 0, H, D, H, 0.78, `进深 ${fmt(D)} m`, 'S');
-  drawDim(svg, D, 0, D, H, -0.42, `净高 ${fmt(H)} m`, 'S');
+  drawDim(svg, D, 0, D, H, -0.42, `净高 ${H} m`, 'S');
 }
 
-/* ================= 面板动态区 ================= */
+/* ================= 侧视图（拼接） ================= */
+function renderSideBlend() {
+  const svg = sideSvg;
+  svg.innerHTML = '';
+  const { depth: D, height: H } = state.room;
+  const s = state.screen;
+  const segs = blendSegs();
+  svg.setAttribute('viewBox', `${-SIDE_PAD.l} ${-SIDE_PAD.t} ${D + SIDE_PAD.l + SIDE_PAD.r} ${H + SIDE_PAD.t + SIDE_PAD.b}`);
+  addDefs(svg, 'S');
+  const Z = z => H - z;
+
+  el('rect', { x: 0, y: 0, width: D, height: H, fill: '#fbfcfd', stroke: '#343a40', 'stroke-width': 0.03 }, svg);
+  el('line', { x1: 0, y1: H, x2: D, y2: H, stroke: '#343a40', 'stroke-width': 0.045 }, svg);
+  textAt(svg, 0.06, -0.16, '幕布墙', 0.12, '#868e96', 'start');
+  textAt(svg, D - 0.06, -0.16, '后墙', 0.12, '#868e96', 'end');
+
+  for (const ob of state.obstacles) {
+    el('rect', {
+      x: ob.y, y: 0, width: ob.h, height: H,
+      fill: 'url(#hatchS)', stroke: '#e03131', 'stroke-width': 0.012, 'stroke-opacity': 0.6,
+    }, svg);
+    textAt(svg, ob.y + ob.h / 2, 0.14, ob.name, 0.1, '#c92a2a');
+  }
+
+  if (blendResult && !blendResult.error) {
+    segs.forEach((seg, k) => {
+      const dv = blendResult.devices[k];
+      if (!dv || !dv.ranges.y || !dv.ranges.z) return;
+      const color = devColor(k);
+      const isSel = k === state.blend.selectedIdx;
+      const [y1, y2] = dv.ranges.y, [z1, z2] = dv.ranges.z;
+      el('rect', {
+        x: y1, y: Z(z2), width: Math.max(0, y2 - y1), height: Math.max(0, z2 - z1),
+        fill: color, 'fill-opacity': isSel ? 0.24 : 0.08,
+        stroke: color, 'stroke-width': isSel ? 0.018 : 0.01, 'stroke-opacity': isSel ? 0.9 : 0.35,
+      }, svg);
+    });
+  }
+
+  el('rect', { x: -0.06, y: Z(s.bottom + s.height), width: 0.06, height: s.height, fill: '#1864ab' }, svg);
+  drawDim(svg, 0, Z(0), 0, Z(s.bottom), -0.3, `下沿 ${fmt(s.bottom)}m`, 'S');
+  drawDim(svg, 0, Z(s.bottom), 0, Z(s.bottom + s.height), -0.3, `幕高 ${fmt(s.height)}m`, 'S');
+
+  if (blendResult && !blendResult.error) {
+    segs.forEach((seg, k) => {
+      const dv = blendResult.devices[k];
+      const p = seg.point;
+      if (!dv || !p) return;
+      const color = devColor(k);
+      const hz = seg.lensZ;
+      const selfBad = dv.point && !dv.point.ok;
+      const inPair = (blendResult.point_conflicts || []).some(c => c.type === 'pair' && c.devices.includes(k));
+      const ok = !selfBad && !inPair;
+      const stroke = ok ? color : '#e03131';
+      el('line', { x1: p.y, y1: Z(hz), x2: 0, y2: Z(s.bottom + s.height), stroke: color, 'stroke-width': 0.01, 'stroke-dasharray': '0.06 0.05', 'stroke-opacity': 0.6 }, svg);
+      el('line', { x1: p.y, y1: Z(hz), x2: 0, y2: Z(s.bottom), stroke: color, 'stroke-width': 0.01, 'stroke-dasharray': '0.06 0.05', 'stroke-opacity': 0.6 }, svg);
+      const body = el('rect', {
+        x: p.y, y: Z(hz + seg.scheme.body_h / 2), width: seg.scheme.body_d, height: seg.scheme.body_h,
+        fill: color, 'fill-opacity': 0.4, stroke, 'stroke-width': k === state.blend.selectedIdx ? 0.025 : 0.015,
+        class: 'side-body',
+      }, svg);
+      body.addEventListener('pointerdown', e => {
+        state.blend.selectedIdx = k;
+        startDrag(e, { type: 'sidebpoint', idx: k });
+        render();
+      });
+      el('circle', { cx: p.y, cy: Z(hz), r: k === state.blend.selectedIdx ? 0.07 : 0.05, fill: '#fff', stroke, 'stroke-width': 0.02, class: 'point-handle' }, svg)
+        .addEventListener('pointerdown', e => {
+          state.blend.selectedIdx = k;
+          startDrag(e, { type: 'sidebpoint', idx: k });
+          render();
+        });
+      textAt(svg, p.y + 0.1, Z(hz) - 0.12, `${k + 1}号`, 0.1, color, 'start');
+    });
+  }
+
+  drawDim(svg, 0, H, D, H, 0.78, `进深 ${fmt(D)} m`, 'S');
+  drawDim(svg, D, 0, D, H, -0.42, `净高 ${H} m`, 'S');
+}
+
+function renderSide() {
+  sideSvg.innerHTML = '';
+  if (state.mode === 'single') renderSideSingle();
+  else renderSideBlend();
+}
+
+/* ================= 幕布条带（拼接） ================= */
+const STRIP_PAD = { l: 1.7, t: 0.35, r: 0.5, b: 0.5 };
+
+function renderStrip() {
+  stripSvg.innerHTML = '';
+  if (state.mode !== 'blend') return;
+  const s = state.screen;
+  const segs = blendSegs();
+  const n = segs.length;
+  const minU = Math.min(0, ...segs.map(g => g.u0));
+  const maxU = Math.max(s.width, ...segs.map(g => g.u1));
+  const xLo = uToX(minU), xHi = uToX(maxU);
+  const rowH = 0.62, gap = 0.12;
+  const totalH = n * rowH + (n - 1) * gap + 0.3;
+  stripSvg.setAttribute('viewBox',
+    `${xLo - STRIP_PAD.l} ${-STRIP_PAD.t} ${xHi - xLo + STRIP_PAD.l + STRIP_PAD.r} ${totalH + STRIP_PAD.t + STRIP_PAD.b}`);
+  addDefs(stripSvg, 'B');
+
+  const topY = 0.05;
+  // 整幅幕布底衬
+  const xL = screenLeftX(), xR = xL + s.width;
+  el('rect', { x: xL, y: topY - 0.02, width: s.width, height: totalH - 0.06, fill: '#eef4fb', stroke: '#1864ab', 'stroke-width': 0.012, 'stroke-dasharray': '0.08 0.05' }, stripSvg);
+  textAt(stripSvg, xL, topY - 0.2, '幕左沿 0', 0.11, '#1864ab', 'middle');
+  textAt(stripSvg, xR, topY - 0.2, `幕右沿 ${fmt(s.width)}`, 0.11, '#1864ab', 'middle');
+
+  segs.forEach((seg, k) => {
+    const y = topY + k * (rowH + gap);
+    const a = uToX(seg.u0), b = uToX(seg.u1);
+    const color = devColor(k);
+    const isSel = k === state.blend.selectedIdx;
+    const dv = blendResult && blendResult.devices ? blendResult.devices[k] : null;
+    const feasible = dv && dv.feasible;
+
+    // 行标签
+    const lab = el('text', {
+      x: xLo - 0.12, y: y + rowH / 2, 'font-size': 0.13, fill: color,
+      'text-anchor': 'end', 'dominant-baseline': 'middle', class: 'halo',
+      'font-weight': '600',
+    }, stripSvg);
+    lab.textContent = `${k + 1}号机`;
+
+    // 区间条
+    el('rect', {
+      x: a, y: y + 0.1, width: Math.max(0.02, b - a), height: rowH - 0.2,
+      fill: color, 'fill-opacity': isSel ? 0.33 : 0.18,
+      stroke: feasible === false ? '#e03131' : color,
+      'stroke-width': isSel ? 0.025 : 0.015, rx: 0.03,
+      class: 'strip-row',
+    }, stripSvg).addEventListener('click', () => {
+      state.blend.selectedIdx = k;
+      render();
+    });
+
+    // 邻接重叠斜纹
+    if (k < n - 1) {
+      const ovA = uToX(segs[k + 1].u0), ovB = uToX(seg.u1);
+      const ov = segs[k].u1 - segs[k + 1].u0;
+      if (ov > 0) {
+        const need = Math.max(seg.min_overlap, segs[k + 1].min_overlap);
+        el('rect', {
+          x: ovA, y: y + 0.1, width: ovB - ovA, height: (rowH - 0.2) * 2 + gap,
+          fill: ov + 1e-6 >= need ? 'url(#ovhatchB)' : '#e03131',
+          'fill-opacity': ov + 1e-6 >= need ? 1 : 0.35,
+        }, stripSvg);
+        textAt(stripSvg, (ovA + ovB) / 2, y + rowH + gap / 2,
+          `重叠 ${fmt(ov)}m${ov + 1e-6 >= need ? '' : ` < ${fmt(need)}`}`, 0.105,
+          ov + 1e-6 >= need ? '#2b8a3e' : '#c92a2a');
+      } else if (ov < 0) {
+        // 缝隙
+        el('rect', { x: ovB, y: y + 0.08, width: ovA - ovB, height: rowH - 0.16, fill: '#e03131', 'fill-opacity': 0.5 }, stripSvg);
+        textAt(stripSvg, (ovA + ovB) / 2, y + rowH / 2, `缝 ${fmt(-ov)}m`, 0.1, '#fff');
+      }
+    }
+
+    // 宽度/区间标注
+    textAt(stripSvg, (a + b) / 2, y + rowH / 2 + 0.02,
+      `区间宽 ${fmt(seg.u1 - seg.u0)}m　净距 ${fmt(seg.clearance)}m`, 0.115,
+      feasible === false ? '#c92a2a' : '#343a40');
+    textAt(stripSvg, a, y + rowH + 0.06, fmt(seg.u0), 0.095, '#868e96');
+    textAt(stripSvg, b, y + rowH + 0.06, fmt(seg.u1), 0.095, '#868e96');
+
+    // 端点手柄（三角，可拖）
+    const mkHandle = (hx, which) => {
+      const g = el('g', { class: 'strip-handle' }, stripSvg);
+      el('polygon', {
+        points: `${hx},${y + 0.02} ${hx - 0.08},${y - 0.1} ${hx + 0.08},${y - 0.1}`,
+        fill: '#fff', stroke: color, 'stroke-width': 0.02,
+      }, g);
+      g.addEventListener('pointerdown', e => {
+        state.blend.selectedIdx = k;
+        startDrag(e, { type: `strip${which}`, idx: k });
+        render();
+      });
+    };
+    mkHandle(a, 0);
+    const g2 = el('g', { class: 'strip-handle' }, stripSvg);
+    el('polygon', {
+      points: `${b},${y + rowH - 0.02} ${b - 0.08},${y + rowH + 0.1} ${b + 0.08},${y + rowH + 0.1}`,
+      fill: '#fff', stroke: color, 'stroke-width': 0.02,
+    }, g2);
+    g2.addEventListener('pointerdown', e => {
+      state.blend.selectedIdx = k;
+      startDrag(e, { type: 'strip1', idx: k });
+      render();
+    });
+  });
+}
+
+/* ================= 面板：单机方案列表 ================= */
 function renderSchemeList() {
   const ul = document.getElementById('schemeList');
   ul.innerHTML = '';
   const items = state.schemes.map(sch => ({ sch, r: resultById[sch.id] }));
-  // 可行方案排在不可行前；可行方案内普通二维区域（按面积降序）在前、退化安装线（按可行长度降序）在后
   const rankOf = r => (!r || !r.feasible) ? 2 : (r.domain === 'line' ? 1 : 0);
   const metricOf = r => (!r || !r.feasible) ? 0 : (r.domain === 'line' ? r.line_length : r.area);
   items.sort((a, b) => {
@@ -452,6 +989,33 @@ function renderSchemeList() {
   document.getElementById('schemeEditorCard').style.display = currentScheme() ? '' : 'none';
 }
 
+/* ================= 面板：拼接设备列表 ================= */
+function renderBlendList() {
+  const ul = document.getElementById('blendList');
+  ul.innerHTML = '';
+  blendSegs().forEach((seg, k) => {
+    const dv = blendDeviceResult(k);
+    const li = document.createElement('li');
+    li.className = 'scheme-item' + (k === state.blend.selectedIdx ? ' selected' : '');
+    let stTxt = '…';
+    if (dv) {
+      if (!dv.feasible) stTxt = '不可行';
+      else if (dv.domain === 'line') stTxt = `安装线 ${fmt(dv.line_length)}m`;
+      else stTxt = `${fmt(dv.area)} m²`;
+    }
+    const ovTxt = k < blendSegs().length - 1
+      ? `重叠 ${fmt(Math.max(0, seg.u1 - blendSegs()[k + 1].u0))}m` : '';
+    li.innerHTML =
+      `<span class="rank" style="background:${devColor(k)}">${k + 1}</span>` +
+      `<span class="name" title="${esc(seg.scheme.name)}">${esc(seg.scheme.name)}</span>` +
+      `<span class="tr">${ovTxt}</span>` +
+      `<span class="area ${dv && !dv.feasible ? 'bad' : ''}">${stTxt}</span>`;
+    if (dv && !dv.feasible) li.title = dv.diagnostics.join('\n');
+    li.addEventListener('click', () => { state.blend.selectedIdx = k; render(); });
+    ul.appendChild(li);
+  });
+}
+
 function renderObstacleList() {
   const ul = document.getElementById('obstacleList');
   ul.innerHTML = '';
@@ -472,7 +1036,8 @@ function renderObstacleList() {
   document.getElementById('delObstacleBtn').disabled = !state.selectedObstacleId;
 }
 
-function renderPointInfo() {
+/* ================= 面板：选点信息（单机） ================= */
+function renderPointInfoSingle() {
   const box = document.getElementById('pointInfo');
   const sch = currentScheme();
   const sel = resultById[state.selectedSchemeId];
@@ -518,6 +1083,91 @@ function renderPointInfo() {
   box.innerHTML = html;
 }
 
+/* ================= 面板：联合状态（拼接） ================= */
+function renderPointInfoBlend() {
+  const box = document.getElementById('pointInfo');
+  const segs = blendSegs();
+  let html = '<h2>拼接联合状态</h2>';
+
+  if (blendResult && blendResult.error) {
+    html += `<div class="diag-box">❌ ${esc(blendResult.error)}</div>`;
+    box.innerHTML = html;
+    return;
+  }
+  if (!blendResult) {
+    box.innerHTML = html + '<p class="hint">计算中…</p>';
+    return;
+  }
+
+  const st = blendResult.status;
+  const banner = {
+    ok: ['ok-box', '✅ 联合可行：存在一组安装点，使覆盖连续、邻接重叠达标、检修包络彼此及与禁装区均不相交'],
+    joint_conflict: ['diag-box', '⚠ 当前安装点存在冲突（顶视图 × 为服务器给出的可行建议点，可直接点击或拖动采纳）'],
+    device_infeasible: ['diag-box', '❌ 存在设备无可行安装域，未保存部分方案——请先解决下列设备级冲突'],
+    interval_invalid: ['diag-box', '❌ 覆盖区间约束不成立（未连续覆盖、重叠不足或区间无序），未保存部分方案'],
+    joint_infeasible: ['diag-box', '❌ 各机单独可行，但联合约束冲突：不存在一组安装点使检修包络同时互避，未保存部分方案'],
+  }[st] || ['diag-box', st];
+  html += `<div class="${banner[0]}">${banner[1]}</div>`;
+
+  if (blendResult.diagnostics.length) {
+    html += '<div class="diag-box" style="margin-top:6px"><b>诊断（设备 · 区间 · 冲突来源）：</b><ul>' +
+      blendResult.diagnostics.map(d => `<li>${esc(d)}</li>`).join('') + '</ul></div>';
+  }
+
+  // 邻接重叠
+  if (blendResult.overlaps.length) {
+    html += '<table class="checks"><tr><td class="cname">邻接</td><td>重叠 / 要求</td><td></td></tr>';
+    for (const ov of blendResult.overlaps) {
+      html += `<tr><td class="ico">${ov.ok ? '✅' : '❌'}</td>` +
+        `<td class="cname">${ov.between[0] + 1}↔${ov.between[1] + 1}</td>` +
+        `<td>${fmt(ov.value)}m / ${fmt(ov.required)}m</td></tr>`;
+    }
+    html += '</table>';
+  }
+
+  // 每台设备校验
+  html += '<table class="checks">';
+  blendResult.devices.forEach((dv, k) => {
+    const seg = segs[k];
+    const color = devColor(k);
+    const p = dv.point;
+    const inPair = (blendResult.point_conflicts || []).some(c => c.type === 'pair' && c.devices.includes(k));
+    const ok = dv.feasible && p && p.ok && !inPair;
+    html += `<tr><td class="ico"><span style="color:${color};font-weight:700">${k + 1}</span></td>` +
+      `<td class="cname" style="color:${color}">${esc(seg.scheme.name)}</td>` +
+      `<td>区间 [${fmt(seg.u0)}, ${fmt(seg.u1)}]m，宽 ${fmt(seg.u1 - seg.u0)}m，` +
+      `TR ${seg.scheme.tr_min}–${seg.scheme.tr_max}，净距 ${fmt(seg.clearance)}m` +
+      (dv.feasible
+        ? (dv.domain === 'line' ? `，安装线 ${fmt(dv.line_length)}m` : `，域 ${fmt(dv.area)}m²`)
+        : '，<b style="color:#c92a2a">无可行域</b>') +
+      (p ? `，L=${fmt(p.throw_distance)}m，h=${fmt(seg.lensZ)}m ${ok ? '✅' : '❌'}` : '') +
+      (inPair ? ' <b style="color:#c92a2a">检修包络与邻机相交</b>' : '') +
+      '</td></tr>';
+    if (!dv.feasible) {
+      for (const d of dv.diagnostics) html += `<tr><td></td><td></td><td class="hint" style="color:#a61e1e">${esc(d)}</td></tr>`;
+    } else if (p && !p.ok) {
+      const bad = Object.entries(p.checks).filter(([, v]) => !v).map(([kk]) =>
+        ({ throw: '投射距离', shift: '水平位移', wall: '墙面余量', obstacle: '避障/净距', height: '镜头高度' }[kk]));
+      html += `<tr><td></td><td></td><td class="hint" style="color:#a61e1e">当前点不满足：${bad.join('、')}${p.obstacle_hit ? `（${esc(p.obstacle_hit)}）` : ''}</td></tr>`;
+    }
+  });
+  html += '</table>';
+
+  if (blendResult.suggested_points &&
+      ['ok', 'joint_conflict'].includes(blendResult.status)) {
+    const allMatch = segs.every((seg, k) => {
+      const sp = blendResult.suggested_points[k];
+      return seg.point && Math.hypot(seg.point.x - sp.x, seg.point.y - sp.y) < 0.03;
+    });
+    html += allMatch
+      ? '<div class="ok-box" style="margin-top:6px">✅ 当前各安装点即为联合可行解</div>'
+      : '<button id="adoptBtn" class="wide" style="margin-top:6px">⤷ 采纳服务器建议安装点</button>';
+  }
+  box.innerHTML = html;
+  const btn = document.getElementById('adoptBtn');
+  if (btn) btn.addEventListener('click', () => adoptSuggested(true));
+}
+
 /* ================= 输入绑定 ================= */
 const numBindings = [];
 function bindNum(id, get, set, digits = 2) {
@@ -531,11 +1181,13 @@ function bindNum(id, get, set, digits = 2) {
 
 function syncInputs() {
   for (const [input, get, digits] of numBindings) {
-    if (document.activeElement !== input) input.value = fmt(get(), digits);
+    if (document.activeElement !== input) {
+      const v = get();
+      input.value = v === null || v === undefined ? '' : fmt(v, digits);
+    }
   }
   const sch = currentScheme();
   document.getElementById('schName').value = sch ? sch.name : '';
-  // 镜头高度滑块
   const slider = document.getElementById('lensHeight');
   const sel = resultById[state.selectedSchemeId];
   const lo = sel && sel.ranges.z ? sel.ranges.z[0] : 0;
@@ -554,10 +1206,27 @@ function syncInputs() {
   } else {
     hint.textContent = '';
   }
+
+  // 拼接编辑卡
+  const seg = currentSeg();
+  document.getElementById('bschName').value = seg ? seg.scheme.name : '';
+  const bh = document.getElementById('bschHint');
+  if (seg && blendResult) {
+    const k = state.blend.selectedIdx;
+    const dv = blendDeviceResult(k);
+    document.getElementById('blendEditorTitle').textContent = `${k + 1} 号机参数（覆盖 ${fmt(seg.u0)}–${fmt(seg.u1)}m）`;
+    if (dv && dv.ranges && dv.ranges.z) {
+      bh.textContent = `镜头高度允许 ${fmt(dv.ranges.z[0])}–${fmt(dv.ranges.z[1])}m（区间宽 ${fmt(seg.u1 - seg.u0)}m，区间中心 x=${fmt(segCenterX(seg))}m）`;
+      bh.className = 'hint';
+    } else if (dv) {
+      bh.textContent = '⚠ 该设备垂直方向无可行高度';
+      bh.className = 'hint warn';
+    }
+  }
 }
 
 function bindAllInputs() {
-  const R = () => state.room, S = () => state.screen;
+  const R = () => state.room, S = () => state.screen, B = () => currentSeg();
   bindNum('roomWidth', () => R().width, v => R().width = v);
   bindNum('roomDepth', () => R().depth, v => R().depth = v);
   bindNum('roomHeight', () => R().height, v => R().height = v);
@@ -602,6 +1271,38 @@ function bindAllInputs() {
     state.selectedSchemeId = state.schemes[0].id;
     onStateChange();
   });
+
+  /* ---- 模式切换 ---- */
+  document.getElementById('modeSingle').addEventListener('click', enterSingleMode);
+  document.getElementById('modeBlend').addEventListener('click', enterBlendMode);
+  document.getElementById('blendCount').addEventListener('change', e => {
+    splitSegmentsEven(parseInt(e.target.value, 10));
+    onStateChange();
+  });
+  document.getElementById('blendResplitBtn').addEventListener('click', () => {
+    splitSegmentsEven(blendSegs().length);
+    onStateChange();
+  });
+
+  /* ---- 拼接设备编辑 ---- */
+  bindNum('bschU0', () => B()?.u0, v => { const g = B(); if (g) g.u0 = v; });
+  bindNum('bschU1', () => B()?.u1, v => { const g = B(); if (g) g.u1 = v; });
+  bindNum('bschOverlap', () => B()?.min_overlap, v => { const g = B(); if (g) g.min_overlap = v; });
+  bindNum('bschClearance', () => B()?.clearance, v => { const g = B(); if (g) g.clearance = v; });
+  bindNum('bschTrMin', () => B()?.scheme.tr_min, v => { const g = B(); if (g) g.scheme.tr_min = v; });
+  bindNum('bschTrMax', () => B()?.scheme.tr_max, v => { const g = B(); if (g) g.scheme.tr_max = v; });
+  bindNum('bschHShift', () => (B()?.scheme.h_shift ?? 0) * 100, v => { const g = B(); if (g) g.scheme.h_shift = v / 100; }, 0);
+  bindNum('bschVShift', () => (B()?.scheme.v_shift ?? 0) * 100, v => { const g = B(); if (g) g.scheme.v_shift = v / 100; }, 0);
+  bindNum('bschBodyW', () => B()?.scheme.body_w, v => { const g = B(); if (g) g.scheme.body_w = v; });
+  bindNum('bschBodyD', () => B()?.scheme.body_d, v => { const g = B(); if (g) g.scheme.body_d = v; });
+  bindNum('bschBodyH', () => B()?.scheme.body_h, v => { const g = B(); if (g) g.scheme.body_h = v; });
+  bindNum('bschLensZ', () => B()?.lensZ, v => { const g = B(); if (g) g.lensZ = v; });
+  document.getElementById('bschName').addEventListener('input', e => {
+    const g = currentSeg();
+    if (g) { g.scheme.name = e.target.value; renderBlendList(); scheduleCompute(); }
+  });
+
+  /* ---- 禁装区 ---- */
   const drawBtn = document.getElementById('drawBtn');
   drawBtn.addEventListener('click', () => {
     state.drawMode = !state.drawMode;
@@ -631,7 +1332,7 @@ function deleteSelectedObstacle() {
   onStateChange();
 }
 
-/* ================= 视图交互 ================= */
+/* ================= 拖拽交互 ================= */
 function startDrag(e, info) {
   drag = info;
   e.stopPropagation();
@@ -644,18 +1345,41 @@ function attachViewHandlers() {
     const W = state.room.width, D = state.room.depth;
     if (state.drawMode) {
       drag = { type: 'draw', x0: clamp(p.x, 0, W), y0: clamp(p.y, 0, D), x1: clamp(p.x, 0, W), y1: clamp(p.y, 0, D) };
-    } else {
+      onStateChange();
+      return;
+    }
+    if (state.mode === 'single') {
       state.point.x = clamp(p.x, 0, W);
       state.point.y = clamp(p.y, 0, D);
       drag = { type: 'point' };
+    } else {
+      // 拼接模式：空白处拖动当前选中设备
+      const seg = currentSeg();
+      if (seg) {
+        seg.point = { x: clamp(p.x, 0, W), y: clamp(p.y, 0, D) };
+        drag = { type: 'bpoint', idx: state.blend.selectedIdx };
+      }
     }
     onStateChange();
   });
+
   sideSvg.addEventListener('pointerdown', e => {
     const p = svgWorld(sideSvg, e);
-    state.point.y = clamp(p.x, 0, state.room.depth);
-    state.lensHeight = clamp(state.room.height - p.y, 0, state.room.height);
-    drag = { type: 'sidepoint' };
+    const y = clamp(p.x, 0, state.room.depth);
+    const z = clamp(state.room.height - p.y, 0, state.room.height);
+    if (state.mode === 'single') {
+      state.point.y = y;
+      state.lensHeight = z;
+      drag = { type: 'sidepoint' };
+    } else {
+      const seg = currentSeg();
+      if (seg) {
+        seg.point = seg.point || { x: segCenterX(seg), y };
+        seg.point.y = y;
+        seg.lensZ = z;
+        drag = { type: 'sidebpoint', idx: state.blend.selectedIdx };
+      }
+    }
     onStateChange();
   });
 
@@ -665,12 +1389,40 @@ function attachViewHandlers() {
       const p = svgWorld(sideSvg, e);
       state.point.y = clamp(p.x, 0, state.room.depth);
       state.lensHeight = clamp(state.room.height - p.y, 0, state.room.height);
+    } else if (drag.type === 'sidebpoint') {
+      const seg = blendSegs()[drag.idx];
+      const p = svgWorld(sideSvg, e);
+      if (seg) {
+        seg.point = seg.point || { x: segCenterX(seg), y: 0 };
+        seg.point.y = clamp(p.x, 0, state.room.depth);
+        seg.lensZ = clamp(state.room.height - p.y, 0, state.room.height);
+      }
+    } else if (drag.type === 'strip0' || drag.type === 'strip1') {
+      const seg = blendSegs()[drag.idx];
+      const p = svgWorld(stripSvg, e);
+      const u = xToU(p.x);
+      const Sw = state.screen.width;
+      if (!seg) return;
+      if (drag.type === 'strip0') {
+        const lo = drag.idx > 0 ? blendSegs()[drag.idx - 1].u0 + 0.15 : -Sw * 0.4;
+        seg.u0 = clamp(u, lo, seg.u1 - 0.15);
+      } else {
+        const hi = drag.idx < blendSegs().length - 1 ? blendSegs()[drag.idx + 1].u1 - 0.15 : Sw * 1.4;
+        seg.u1 = clamp(u, seg.u0 + 0.15, hi);
+      }
     } else {
       const p = svgWorld(topSvg, e);
       const W = state.room.width, D = state.room.depth;
       if (drag.type === 'point') {
         state.point.x = clamp(p.x, 0, W);
         state.point.y = clamp(p.y, 0, D);
+      } else if (drag.type === 'bpoint') {
+        const seg = blendSegs()[drag.idx];
+        if (seg) {
+          seg.point = seg.point || { x: 0, y: 0 };
+          seg.point.x = clamp(p.x, 0, W);
+          seg.point.y = clamp(p.y, 0, D);
+        }
       } else if (drag.type === 'screen') {
         state.screen.cx = clamp(p.x - drag.dx, state.screen.width / 2, W - state.screen.width / 2);
       } else if (drag.type === 'ob') {
@@ -714,9 +1466,15 @@ function render() {
   sanitize();
   renderTop();
   renderSide();
-  renderSchemeList();
+  renderStrip();
+  if (state.mode === 'single') {
+    renderSchemeList();
+  } else {
+    renderBlendList();
+  }
   renderObstacleList();
-  renderPointInfo();
+  if (state.mode === 'single') renderPointInfoSingle();
+  else renderPointInfoBlend();
   syncInputs();
 }
 
@@ -728,15 +1486,24 @@ function applyState(data) {
   state.obstacles = data.obstacles.map(o => ({ ...o, id: uid() }));
   state.selectedSchemeId = state.schemes.length ? state.schemes[0].id : null;
   state.selectedObstacleId = null;
+  state.blendTemplate = data.blend || null;
+  state.blend.segments = [];
+  state.blend.selectedIdx = 0;
+  blendResult = null;
+  result = null;
+  resultById = {};
   const first = state.schemes[0];
   state.point = {
     x: state.screen.cx,
     y: first ? clamp((first.tr_min + first.tr_max) / 2 * state.screen.width, 0, state.room.depth) : state.room.depth / 2,
   };
   state.lensHeight = state.screen.bottom + state.screen.height / 2;
-  result = null;
-  resultById = {};
-  onStateChange();
+
+  if (data.blend) {
+    enterBlendMode();   // 内部会触发首次计算
+  } else {
+    enterSingleMode();
+  }
 }
 
 async function initExamples() {
@@ -760,5 +1527,6 @@ async function initExamples() {
 /* ================= 启动 ================= */
 bindAllInputs();
 attachViewHandlers();
+applyModeChrome();
 render();
 initExamples();

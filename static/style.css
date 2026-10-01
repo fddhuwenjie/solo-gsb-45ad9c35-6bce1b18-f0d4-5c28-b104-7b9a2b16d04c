@@ -28,6 +28,21 @@ header h1 { font-size: 17px; margin: 0; font-weight: 600; }
 button.active { background: #e03131; color: #fff; border-color: #c92a2a; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 
+.mode-switch { display: inline-flex; border: 1px solid rgba(255,255,255,0.5); border-radius: 6px; overflow: hidden; }
+.mode-switch button {
+  font-size: 13px; padding: 5px 12px; border: none; border-radius: 0;
+  background: rgba(255,255,255,0.18); color: #fff; cursor: pointer;
+}
+.mode-switch button.active { background: #fff; color: #1864ab; font-weight: 600; }
+
+[hidden] { display: none !important; }
+
+.blend-controls { display: flex; align-items: flex-end; gap: 10px; margin-bottom: 6px; }
+.blend-controls label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #495057; }
+.blend-controls select { padding: 4px 6px; border: 1px solid #ced4da; border-radius: 4px; font-size: 13px; }
+.blend-controls .wide { margin-top: 0; flex: 1; }
+.strip-row { cursor: pointer; }
+
 main {
   display: grid;
   grid-template-columns: 350px minmax(0, 1fr);
@@ -112,12 +127,13 @@ table.checks td { padding: 4px 4px; border-bottom: 1px solid #f1f3f5; vertical-a
 table.checks .ico { width: 22px; text-align: center; }
 table.checks .cname { font-weight: 600; white-space: nowrap; }
 
-#views { display: grid; grid-template-rows: minmax(0, 1.35fr) minmax(0, 1fr); gap: 10px; min-width: 0; min-height: 0; }
+#views { display: grid; grid-template-rows: minmax(0, 1.35fr) minmax(0, 1fr) auto; gap: 10px; min-width: 0; min-height: 0; }
 .view-box {
   background: #fff; border-radius: 8px; padding: 8px 10px;
   display: flex; flex-direction: column; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
   min-height: 0;
 }
+#stripBox { max-height: 230px; }
 .view-box h2 { font-size: 12px; margin: 0 0 4px; color: #495057; font-weight: 600; }
 svg { flex: 1; width: 100%; min-height: 0; touch-action: none; }
 
@@ -127,6 +143,8 @@ svg { flex: 1; width: 100%; min-height: 0; touch-action: none; }
 .screen-hit, .screen-core { cursor: ew-resize; }
 .point-handle { cursor: move; }
 .side-body { cursor: move; }
+.strip-handle { cursor: ew-resize; }
+.sugg-handle { cursor: pointer; }
 .resize-handle { fill: #e03131; stroke: #fff; stroke-width: 0.02px; cursor: nwse-resize; }
 
 /* SVG 文本 */

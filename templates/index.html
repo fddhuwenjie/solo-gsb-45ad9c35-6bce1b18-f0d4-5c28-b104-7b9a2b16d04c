@@ -10,8 +10,12 @@
 <header>
   <h1>📽️ 会议室投影机选位工作台</h1>
   <div class="header-actions">
+    <div class="mode-switch" role="tablist">
+      <button id="modeSingle" class="active">单机选位</button>
+      <button id="modeBlend">多机拼接</button>
+    </div>
     <select id="exampleSelect" title="载入内置示例"></select>
-    <label class="chk"><input type="checkbox" id="showAll" checked> 显示所有方案区域</label>
+    <label class="chk" id="showAllWrap"><input type="checkbox" id="showAll" checked> 显示所有方案区域</label>
     <button id="drawBtn" title="在顶视图中拖拽绘制矩形禁装区">▦ 绘制禁装区</button>
     <button id="delObstacleBtn" title="删除当前选中的禁装区" disabled>🗑 删除禁装区</button>
   </div>
@@ -39,13 +43,14 @@
       </div>
     </section>
 
-    <section class="card">
+    <!-- 单机模式面板 -->
+    <section class="card mode-single">
       <h2>镜头方案（二维区域优先 · 安装线次之 · 均在不可行之前）</h2>
       <ul id="schemeList" class="scheme-list"></ul>
       <button id="addSchemeBtn" class="wide">＋ 添加方案</button>
     </section>
 
-    <section class="card" id="schemeEditorCard">
+    <section class="card mode-single" id="schemeEditorCard">
       <h2>方案参数</h2>
       <div class="form-grid">
         <label class="span2">名称<input type="text" id="schName"></label>
@@ -60,7 +65,7 @@
       <button id="delSchemeBtn" class="danger wide">删除当前方案</button>
     </section>
 
-    <section class="card">
+    <section class="card mode-single">
       <h2>镜头高度（侧视图可拖动）</h2>
       <div class="slider-row">
         <input type="range" id="lensHeight" step="0.01">
@@ -69,10 +74,50 @@
       <p class="hint" id="lensHeightHint"></p>
     </section>
 
+    <!-- 拼接模式面板 -->
+    <section class="card mode-blend" id="blendSetupCard" hidden>
+      <h2>多机拼接规划</h2>
+      <div class="blend-controls">
+        <label>设备台数
+          <select id="blendCount">
+            <option value="2">2 台</option>
+            <option value="3">3 台</option>
+          </select>
+        </label>
+        <button id="blendResplitBtn" class="wide" title="按当前台数把整幅幕布均匀重分（自动留 0.2m 邻接重叠）">↔ 均分区间</button>
+      </div>
+      <p class="hint">把整幅幕布划成 2~3 个从左到右的有序覆盖区间；区间宽度替代整幅幕宽参与投射比计算，区间中心决定水平位移。可在下方「幕布条带」拖动分区端点，也可直接改端点数值。</p>
+    </section>
+
+    <section class="card mode-blend" hidden>
+      <h2>拼接设备（按从左到右顺序）</h2>
+      <ul id="blendList" class="scheme-list"></ul>
+    </section>
+
+    <section class="card mode-blend" id="blendEditorCard" hidden>
+      <h2 id="blendEditorTitle">设备参数</h2>
+      <div class="form-grid">
+        <label class="span2">名称<input type="text" id="bschName"></label>
+        <label>区间起点 u0 (m)<input type="number" id="bschU0" step="0.05"></label>
+        <label>区间终点 u1 (m)<input type="number" id="bschU1" step="0.05"></label>
+        <label>最小拼接重叠 (m)<input type="number" id="bschOverlap" step="0.05" min="0" max="6"></label>
+        <label>机身检修净距 (m)<input type="number" id="bschClearance" step="0.05" min="0" max="2"></label>
+        <label>投射比下限<input type="number" id="bschTrMin" step="0.05" min="0.1" max="10"></label>
+        <label>投射比上限<input type="number" id="bschTrMax" step="0.05" min="0.1" max="10"></label>
+        <label>水平位移 ±%<input type="number" id="bschHShift" step="5" min="0" max="150"></label>
+        <label>垂直位移 ±%<input type="number" id="bschVShift" step="5" min="0" max="150"></label>
+        <label>机身宽 (m)<input type="number" id="bschBodyW" step="0.01" min="0.1" max="2.5"></label>
+        <label>机深 (m)<input type="number" id="bschBodyD" step="0.01" min="0.1" max="2.5"></label>
+        <label>机身高 (m)<input type="number" id="bschBodyH" step="0.01" min="0.05" max="1.5"></label>
+        <label>镜头高度 (m)<input type="number" id="bschLensZ" step="0.01" min="0" max="10"></label>
+      </div>
+      <p class="hint" id="bschHint"></p>
+    </section>
+
     <section class="card">
       <h2>禁装区（顶视图）</h2>
       <ul id="obstacleList" class="obstacle-list"></ul>
-      <p class="hint">点击「绘制禁装区」后在顶视图拖拽出矩形；拖动可移动，拖动右下角手柄可缩放。</p>
+      <p class="hint">点击「绘制禁装区」后在顶视图拖拽出矩形；拖动可移动，拖动右下角手柄可缩放。拼接模式下禁装区按各机检修包络逐机扣除。</p>
     </section>
 
     <section class="card" id="pointInfo"></section>
@@ -80,12 +125,16 @@
 
   <section id="views">
     <div class="view-box">
-      <h2>顶视图（单击/拖动设置安装点 · 拖动幕布与禁装区即时重算）</h2>
+      <h2 id="topTitle">顶视图（单击/拖动设置安装点 · 拖动幕布与禁装区即时重算）</h2>
       <svg id="topView" preserveAspectRatio="xMidYMid meet"></svg>
     </div>
     <div class="view-box">
-      <h2>侧视图（沿幕布墙剖面 · 拖动投影机调整镜头高度与距离）</h2>
+      <h2 id="sideTitle">侧视图（沿幕布墙剖面 · 拖动投影机调整镜头高度与距离）</h2>
       <svg id="sideView" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="view-box mode-blend" id="stripBox" hidden>
+      <h2>幕布条带（从左到右有序覆盖 · 拖动三角手柄调整区间端点 · 斜纹区为邻接重叠）</h2>
+      <svg id="stripView" preserveAspectRatio="xMidYMid meet"></svg>
     </div>
   </section>
 </main>
