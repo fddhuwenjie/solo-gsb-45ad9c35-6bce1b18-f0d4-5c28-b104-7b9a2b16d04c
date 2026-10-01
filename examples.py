@@ -76,4 +76,64 @@ EXAMPLES = [
             ],
         },
     },
+    {
+        "id": "blend2",
+        "name": "示例 4：双机拼接 10×10m（6m 宽幕 · 0.6m 重叠）",
+        "data": {
+            "room": {"width": 10.0, "depth": 10.0, "height": 3.2, "margin": 0.3},
+            "screen": {"width": 6.0, "height": 2.2, "bottom": 0.9, "cx": 5.0},
+            "schemes": [
+                {"name": "拼接机 标准镜头 1.3–2.1", "tr_min": 1.3, "tr_max": 2.1,
+                 "h_shift": 0.30, "v_shift": 0.55,
+                 "body_w": 0.48, "body_d": 0.42, "body_h": 0.18},
+                {"name": "拼接机 标准镜头 1.3–2.1", "tr_min": 1.3, "tr_max": 2.1,
+                 "h_shift": 0.30, "v_shift": 0.55,
+                 "body_w": 0.48, "body_d": 0.42, "body_h": 0.18},
+            ],
+            "obstacles": [
+                {"name": "中央吊灯", "x": 4.3, "y": 3.2, "w": 1.4, "h": 0.9},
+                {"name": "空调柜机", "x": 9.1, "y": 0.4, "w": 0.6, "h": 0.8},
+            ],
+            # 两台各负责 3.3m 宽区间、邻接重叠 0.6m（区间总宽 6.6m，末缘恰为幕宽 6.0m）；
+            # 机身横向检修净距 0.30m、纵深 0.30m。
+            "zones": [
+                {"name": "左区间", "scheme": 0, "width": 3.3,
+                 "min_overlap": 0.0, "service_x": 0.30, "service_y": 0.30},
+                {"name": "右区间", "scheme": 1, "width": 3.3,
+                 "min_overlap": 0.6, "service_x": 0.30, "service_y": 0.30},
+            ],
+        },
+    },
+    {
+        "id": "blend3",
+        "name": "示例 5：三机拼接 12×11m（8m 宽幕 · 各 0.4m 重叠）",
+        "data": {
+            "room": {"width": 12.0, "depth": 11.0, "height": 3.4, "margin": 0.35},
+            "screen": {"width": 8.0, "height": 2.6, "bottom": 0.85, "cx": 6.0},
+            "schemes": [
+                {"name": "拼接机 1.2–1.8", "tr_min": 1.2, "tr_max": 1.8,
+                 "h_shift": 0.25, "v_shift": 0.55,
+                 "body_w": 0.46, "body_d": 0.40, "body_h": 0.17},
+                {"name": "拼接机 1.2–1.8", "tr_min": 1.2, "tr_max": 1.8,
+                 "h_shift": 0.25, "v_shift": 0.55,
+                 "body_w": 0.46, "body_d": 0.40, "body_h": 0.17},
+                {"name": "拼接机 1.2–1.8", "tr_min": 1.2, "tr_max": 1.8,
+                 "h_shift": 0.25, "v_shift": 0.55,
+                 "body_w": 0.46, "body_d": 0.40, "body_h": 0.17},
+            ],
+            "obstacles": [
+                {"name": "灯架一", "x": 2.0, "y": 2.6, "w": 2.2, "h": 0.6},
+                {"name": "灯架二", "x": 7.8, "y": 2.6, "w": 2.2, "h": 0.6},
+            ],
+            # 三台各 2.933m 宽区间，相邻重叠 0.4m：3×2.933-2×0.4 ≈ 8.0m
+            "zones": [
+                {"name": "左区间", "scheme": 0, "width": 2.934,
+                 "min_overlap": 0.0, "service_x": 0.25, "service_y": 0.25},
+                {"name": "中区间", "scheme": 1, "width": 2.933,
+                 "min_overlap": 0.4, "service_x": 0.25, "service_y": 0.25},
+                {"name": "右区间", "scheme": 2, "width": 2.933,
+                 "min_overlap": 0.4, "service_x": 0.25, "service_y": 0.25},
+            ],
+        },
+    },
 ]

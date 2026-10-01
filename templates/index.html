@@ -10,8 +10,12 @@
 <header>
   <h1>📽️ 会议室投影机选位工作台</h1>
   <div class="header-actions">
+    <div class="mode-switch" role="tablist">
+      <button id="modeSingle" class="mode-btn active" title="单台投影机镜头方案选位">单机选位</button>
+      <button id="modeBlend" class="mode-btn" title="多机拼接：2～3 台设备分区覆盖同一幕布">多机拼接</button>
+    </div>
     <select id="exampleSelect" title="载入内置示例"></select>
-    <label class="chk"><input type="checkbox" id="showAll" checked> 显示所有方案区域</label>
+    <label class="chk" id="showAllWrap"><input type="checkbox" id="showAll" checked> 显示所有方案区域</label>
     <button id="drawBtn" title="在顶视图中拖拽绘制矩形禁装区">▦ 绘制禁装区</button>
     <button id="delObstacleBtn" title="删除当前选中的禁装区" disabled>🗑 删除禁装区</button>
   </div>
@@ -45,6 +49,21 @@
       <button id="addSchemeBtn" class="wide">＋ 添加方案</button>
     </section>
 
+    <section class="card" id="blendPlannerCard" style="display:none">
+      <h2>多机拼接规划（2～3 个有序覆盖区间）</h2>
+      <div class="blend-controls">
+        <label>机台数
+          <select id="zoneCount">
+            <option value="2">2 台拼接</option>
+            <option value="3">3 台拼接</option>
+          </select>
+        </label>
+        <button id="autoBlendBtn" class="wide" title="按区间宽度与最小重叠自动铺满整幅幕布，并重新自动布点">⟳ 配平区间并自动布点</button>
+      </div>
+      <ul id="zoneList" class="zone-list"></ul>
+      <p class="hint">区间宽度替代整幅幕宽参与投射比计算，区间中心决定水平位移；第 1 区间自幕布左缘起，后续区间按最小拼接重叠与前一区间相接，末区间右缘须到达幕布右缘。</p>
+    </section>
+
     <section class="card" id="schemeEditorCard">
       <h2>方案参数</h2>
       <div class="form-grid">
@@ -60,7 +79,7 @@
       <button id="delSchemeBtn" class="danger wide">删除当前方案</button>
     </section>
 
-    <section class="card">
+    <section class="card" id="lensHeightCard">
       <h2>镜头高度（侧视图可拖动）</h2>
       <div class="slider-row">
         <input type="range" id="lensHeight" step="0.01">
@@ -76,12 +95,17 @@
     </section>
 
     <section class="card" id="pointInfo"></section>
+    <section class="card" id="blendInfo" style="display:none"></section>
   </aside>
 
   <section id="views">
     <div class="view-box">
       <h2>顶视图（单击/拖动设置安装点 · 拖动幕布与禁装区即时重算）</h2>
       <svg id="topView" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="view-box" id="stripBox">
+      <h2>幕布条带（分区 · 邻接重叠 · 安装点投影，与顶视图同步）</h2>
+      <svg id="stripView" preserveAspectRatio="xMidYMid meet"></svg>
     </div>
     <div class="view-box">
       <h2>侧视图（沿幕布墙剖面 · 拖动投影机调整镜头高度与距离）</h2>

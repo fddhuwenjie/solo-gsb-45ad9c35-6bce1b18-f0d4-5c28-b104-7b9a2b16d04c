@@ -25,6 +25,13 @@ header h1 { font-size: 17px; margin: 0; font-weight: 600; }
   border: 1px solid rgba(255, 255, 255, 0.4); background: #fff; color: #212529; cursor: pointer;
 }
 .chk { display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.mode-switch { display: flex; border: 1px solid rgba(255,255,255,0.5); border-radius: 6px; overflow: hidden; }
+.mode-btn {
+  font-size: 13px; padding: 5px 12px; border: none; border-radius: 0;
+  background: rgba(255,255,255,0.18); color: #e7f5ff; cursor: pointer;
+}
+.mode-btn + .mode-btn { border-left: 1px solid rgba(255,255,255,0.4); }
+.mode-btn.active { background: #fff; color: #1864ab; font-weight: 600; }
 button.active { background: #e03131; color: #fff; border-color: #c92a2a; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 
@@ -91,6 +98,33 @@ button.danger:hover { background: #ffe3e3; }
 .ob-item .ob-dot { width: 10px; height: 10px; background: repeating-linear-gradient(45deg, #e03131 0 2px, #fff 2px 4px); border: 1px solid #e03131; flex: 0 0 auto; }
 .ob-item .dim { margin-left: auto; font-size: 11px; color: #868e96; font-variant-numeric: tabular-nums; }
 
+.blend-controls { display: flex; gap: 10px; align-items: flex-end; margin-bottom: 8px; }
+.blend-controls label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #495057; }
+.blend-controls select { padding: 4px 6px; border: 1px solid #ced4da; border-radius: 4px; font-size: 13px; }
+.blend-controls .wide { margin-top: 0; flex: 1; }
+.zone-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.zone-item { border: 1px solid #dee2e6; border-radius: 6px; padding: 7px 9px; background: #fbfcfd; cursor: pointer; }
+.zone-item:hover { border-color: #74c0fc; }
+.zone-item.selected { box-shadow: inset 0 0 0 1px #1971c2; border-color: #1971c2; background: #f4faff; }
+.zone-item.bad { border-color: #ffa8a8; background: #fff9f9; }
+.zone-head { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; }
+.zone-head .rank {
+  width: 18px; height: 18px; border-radius: 50%; color: #fff;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 11px; flex: 0 0 auto;
+}
+.zone-head .zname { font-weight: 600; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.zone-head .zstat { font-size: 11px; font-variant-numeric: tabular-nums; color: #2b8a3e; white-space: nowrap; }
+.zone-head .zstat.bad { color: #c92a2a; }
+.zone-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 8px; }
+.zone-grid label { display: flex; flex-direction: column; gap: 1px; font-size: 10px; color: #868e96; }
+.zone-grid select, .zone-grid input { padding: 3px 5px; }
+.zone-vdiag { font-size: 11px; color: #c92a2a; margin-top: 5px; line-height: 1.4; }
+.blend-summary { font-size: 12px; line-height: 1.6; }
+.blend-summary .cov-ok { color: #2b8a3e; font-weight: 600; }
+.blend-summary .cov-bad { color: #c92a2a; font-weight: 600; }
+.pair-row { display: flex; gap: 6px; align-items: center; font-size: 11px; padding: 3px 0; border-bottom: 1px dashed #f1f3f5; }
+.pair-row .ico { width: 18px; text-align: center; }
+
 .slider-row { display: flex; align-items: center; gap: 10px; }
 .slider-row input[type="range"] { flex: 1; }
 .mono { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 52px; text-align: right; }
@@ -112,7 +146,9 @@ table.checks td { padding: 4px 4px; border-bottom: 1px solid #f1f3f5; vertical-a
 table.checks .ico { width: 22px; text-align: center; }
 table.checks .cname { font-weight: 600; white-space: nowrap; }
 
-#views { display: grid; grid-template-rows: minmax(0, 1.35fr) minmax(0, 1fr); gap: 10px; min-width: 0; min-height: 0; }
+#views { display: grid; grid-template-rows: minmax(0, 1.2fr) minmax(0, 0.55fr) minmax(0, 0.95fr); gap: 10px; min-width: 0; min-height: 0; }
+#views.single-mode { grid-template-rows: minmax(0, 1.35fr) minmax(0, 1fr); }
+#views.single-mode #stripBox { display: none; }
 .view-box {
   background: #fff; border-radius: 8px; padding: 8px 10px;
   display: flex; flex-direction: column; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
@@ -123,6 +159,10 @@ svg { flex: 1; width: 100%; min-height: 0; touch-action: none; }
 
 #topView { cursor: crosshair; }
 #topView.drawing { cursor: copy; }
+/* 幕布条带 viewBox 横向很长、纵向很短，统一描边避免被非等比缩放拉变形 */
+#stripView rect, #stripView line, #stripView circle, #stripView .dim {
+  vector-effect: non-scaling-stroke;
+}
 .ob-rect { cursor: move; }
 .screen-hit, .screen-core { cursor: ew-resize; }
 .point-handle { cursor: move; }

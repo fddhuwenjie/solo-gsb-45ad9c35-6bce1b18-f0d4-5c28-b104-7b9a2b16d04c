@@ -25,6 +25,14 @@ python app.py
 
 ## 功能说明
 
+- **单机 / 多机两种模式**：右上角切换「单机选位」与「多机拼接」；房间、幕布、镜头方案库、禁装区在两种模式间共享。
+- **多机拼接规划**：把同一幕布划成 2～3 个**有序覆盖区间**，为每台选择镜头方案，填写区间宽度、最小拼接重叠与机身横向/纵深检修净距。
+  - 每个区间宽度**替代整幅幕宽**参与投射比计算，区间中心决定镜头水平位移中心；墙面余量、垂直位移、禁装区扣除全部复用单机模型（禁装区按“机身尺寸 + 双侧检修净距”膨胀）。
+  - 第 1 区间自幕布左缘起，后续区间按最小拼接重叠与前一区间相接，末区间右缘须到达幕布右缘（条带与面板实时提示缺口/超出与实际重叠）。
+  - 后端分别求出每台可安装域，再用回溯搜索给出一组**同时满足全部约束**的安装点：区间从左到右连续覆盖整幅幕布、邻接重叠不小于要求、机身膨胀后的**检修包络彼此及与禁装区均不相交**（边界接触允许）。
+  - 任一设备无解（`device_infeasible`）、联合约束冲突（`joint_conflict`，会点名冲突设备对）、覆盖结构错误（`structure_error`）时，诊断明确指出**设备、区间与冲突来源**，不保存部分方案。
+  - **拖动任一安装点即时重算**：被拖动设备成为固定点，其余设备自动重排；固定点与自动解冲突时状态为 `pin_conflict`，固定点标红并给出逐点冲突（出域/撞禁装区/撞某台检修包络），双击镜头点或点击「配平区间并自动布点」恢复整组自动解，始终保持整体状态一致。
+  - **幕布条带**与顶视图同步显示分区、邻接重叠、覆盖缺口与安装点投影；顶视图叠加每台可安装域、检修包络、机身与序号安装点；侧视图按区间着色显示各台高度/距离可行域，可分别拖动。
 - **房间与幕布**：设置房间宽 / 进深 / 净高与墙面余量；设置幕布宽高、下沿离地高度，幕布可在顶视图直接拖动。
 - **镜头方案**：录入投射比范围、水平/垂直镜头位移（±%）、机身宽深高；可添加多个方案。
 - **禁装区**：点击「绘制禁装区」后在顶视图拖拽出矩形（如吊灯、横梁、空调、柱子），可拖动移动、拖右下角缩放、Delete 键删除。
@@ -41,19 +49,93 @@ python app.py
   - 侧视图：幕布剖面、投射包络、投射距离×镜头高度可行域、全高禁装带、机身与镜头高度标注。
 - **选点校验**：在顶视图单击或拖动选择镜头位置，侧视图可拖动调整镜头高度与投射距离；面板逐项显示投射距离、位移利用率、墙面余量、避障、镜头高度的 ✓/✗ 与数值。
 - **方案排序**：可行方案始终排在不可行方案之前；同为可行时，普通二维区域按可安装面积降序排列在前，退化安装线按可行总长度降序排列在后；不可行方案标红并可悬停查看冲突原因。
-- **内置示例**：右上角下拉可载入 3 个场景（标准会议室、小型培训室、含无解方案的报告厅），页面打开即自动载入第一个示例。
+- **内置示例**：右上角下拉可载入 5 个场景——3 个单机场景（标准会议室、小型培训室、含无解方案的报告厅）与 2 个拼接场景（双机 6m 宽幕、三机 8m 宽幕）；载入拼接示例会自动切到「多机拼接」模式，页面打开时默认载入第一个单机示例。
 
 ## 文件结构
 
 ```
-app.py              # Flask 服务与 /api/compute、/api/examples 接口
-geometry.py         # 约束交集、矩形扣除、诊断与选点校验的几何计算核心
-examples.py         # 内置示例场景
+app.py              # Flask 服务：/api/compute（单机）、/api/blend（多机拼接）、/api/examples
+geometry.py         # 约束交集、矩形扣除、诊断、选点校验与多机拼接联合求解
+examples.py         # 内置示例场景（单机 3 个 + 拼接 2 个）
 templates/index.html
-static/app.js       # 状态管理、SVG 双视图渲染、拖拽交互
+static/app.js       # 状态管理、单机/拼接双模式、三视图渲染、拖拽交互
 static/style.css
 Dockerfile / docker-compose.yml
 ```
+
+## 接口
+
+### `POST /api/compute`（单机，保持兼容）
+
+入参 `room / screen / schemes / obstacles / point / lens_height`，返回每个方案的可安装域、诊断与选点校验。
+
+### `POST /api/blend`（多机拼接规划）
+
+`zones` 为 2～3 个有序覆盖区间，`schemes` 仍是候选镜头方案库，区间用 `scheme_id` 引用：
+
+| 区间字段 | 含义 |
+| --- | --- |
+| `width` | 区间宽度（米），替代整幅幕宽参与投射比/位移计算 |
+| `min_overlap` | 与左侧相邻区间的最小拼接重叠（米，第 1 区间填 0） |
+| `service_x` / `service_y` | 机身横向 / 纵深检修净距（米） |
+| `scheme_id` | 该区间选用的镜头方案 id |
+
+`points` / `lens_heights` 与 `zones` 等长：未拖动的设备传 `null`（由后端自由求解），拖动后传 `{"x","y"}` 固定该台。
+
+返回联合状态 `status`（`ok / pin_conflict / joint_conflict / device_infeasible / structure_error`）、`joint_feasible`、覆盖结构 `coverage`、联合诊断 `diagnostics`，以及每台的 `zones[]`：可安装域 `region/base_rect/domain/area/line_length`、本台 `diagnostics`、安装点 `point{x,y,z,envelope,valid}` 与固定点 `violations`。
+
+调用示例（示例 4 的双机场景：两台各覆盖 3.3m、邻接重叠 0.6m、检修净距 0.3m）：
+
+```bash
+curl -s -X POST http://localhost:8000/api/blend \
+  -H 'Content-Type: application/json' -d '{
+  "room":  {"width": 10.0, "depth": 10.0, "height": 3.2, "margin": 0.3},
+  "screen": {"width": 6.0, "height": 2.2, "bottom": 0.9, "cx": 5.0},
+  "schemes": [
+    {"id": "s0", "name": "左机", "tr_min": 1.3, "tr_max": 2.1,
+     "h_shift": 0.30, "v_shift": 0.55,
+     "body_w": 0.48, "body_d": 0.42, "body_h": 0.18},
+    {"id": "s1", "name": "右机", "tr_min": 1.3, "tr_max": 2.1,
+     "h_shift": 0.30, "v_shift": 0.55,
+     "body_w": 0.48, "body_d": 0.42, "body_h": 0.18}
+  ],
+  "obstacles": [
+    {"name": "中央吊灯", "x": 4.3, "y": 3.2, "w": 1.4, "h": 0.9}
+  ],
+  "zones": [
+    {"name": "左区间", "scheme_id": "s0", "width": 3.3,
+     "min_overlap": 0.0, "service_x": 0.30, "service_y": 0.30},
+    {"name": "右区间", "scheme_id": "s1", "width": 3.3,
+     "min_overlap": 0.6, "service_x": 0.30, "service_y": 0.30}
+  ],
+  "points": [null, null],
+  "lens_heights": [2.0, 2.0]
+}'
+```
+
+返回（节选）：
+
+```json
+{
+  "status": "ok",
+  "joint_feasible": true,
+  "coverage": [
+    {"left": 0.0, "right": 3.3},
+    {"left": 2.7, "right": 6.0, "overlap_prev": 0.6, "min_overlap": 0.6}
+  ],
+  "zones": [
+    {"index": 0, "feasible": true, "domain": "area",
+     "point": {"x": 2.66, "y": 4.29, "z": 2.0, "valid": true,
+               "envelope": [2.12, 3.99, 3.20, 5.01]}},
+    {"index": 1, "feasible": true, "domain": "area",
+     "point": {"x": 6.24, "y": 4.29, "z": 2.0, "valid": true,
+               "envelope": [5.70, 3.99, 6.78, 5.01]}}
+  ],
+  "diagnostics": []
+}
+```
+
+冲突时（如把两台拖到一起）`status` 变为 `pin_conflict`，对应 `zones[i].point.valid=false` 且 `violations` 逐条给出冲突来源，`diagnostics` 汇总设备 / 区间 / 冲突对；自由解仍在其余设备上给出，不会保存这组冲突固定点。
 
 ## 计算模型
 
@@ -66,3 +148,16 @@ Dockerfile / docker-compose.yml
 侧视图中镜头高度受 `幕布中心 ± 垂直位移×幕高` 与机身上下不穿出房间的交集约束。
 
 退化情形：当 x 交集宽度为 0 而 y 区间长度大于 0 时，可行域为固定 x 的安装线。后端结果中 `domain` 取 `area`（二维区域）、`line`（安装线）或 `empty`（点/无交集），安装线以 `line_length`（米）给出扣除禁装区后的可行总长度而 `area` 为 0；二维计算与 `/api/compute`、`/api/examples` 的其余字段均保持兼容。
+
+多机拼接时，第 i 台设备的“虚拟幕布”宽为其区间宽度、中心为
+`screen.cx − screen.width/2 + 区间左缘 + 区间宽/2`，直接复用上述单机模型
+（墙面余量仍只约束机身；禁装区改为按 `[bw/2+gx, bd+gy]` 膨胀）。检修包络为
+
+```
+[px−bw/2−gx, px+bw/2+gx] × [py−gy, py+bd+gy]
+```
+
+联合约束要求任意两台设备的检修包络严格不相交（仅边界接触不算冲突）。求解器对每台
+“可安装域矩形/安装线 − 已布置设备包络投影矩形”做递归扣除，以 MRV 选择最受限设备、
+角点优先回溯，因此可安装域退化为安装线时同样参与联合求解；无解时逐对忽略设备对做
+恢复测试，点名造成冲突的设备区间对。
